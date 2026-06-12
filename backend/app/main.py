@@ -1,0 +1,573 @@
+import json, logging, base64, os, datetime as dt
+from typing import Optional, List
+from fastapi import (FastAPI, Depends, HTTPException, status,
+                     WebSocket, WebSocketDisconnect, Header, UploadFile, File, Request)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import or_, and_
+from pydantic import BaseModel
+import pathlib, re
+
+from .database import engine, Base, get_db
+from .models import User, Message, Group, GroupMember
+from .auth import hash_password, verify_password, create_access_token, verify_token
+from .crypto_srv import enc, dec
+from .websocket_mgr import manager
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+Base.metadata.create_all(bind=engine)
+
+# ── авто-миграция старых БД ──
+def _auto_migrate():
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    migs = {
+        "users": {
+            "display_name":"VARCHAR(128)","phone":"VARCHAR(32)","birth_date":"VARCHAR(16)",
+            "avatar_emoji":"VARCHAR(16)","avatar_color":"VARCHAR(16)","avatar_b64":"TEXT",
+            "theme":"VARCHAR(16)","ui_scale":"VARCHAR(16)","pinned_chats":"VARCHAR(512)",
+            "folders":"TEXT","hide_online":"BOOLEAN DEFAULT 0","hide_phone":"BOOLEAN DEFAULT 0",
+            "favorites":"TEXT DEFAULT '[]'","sessions":"TEXT DEFAULT '[]'"
+        },
+        "messages": {
+            "group_id":"INTEGER","msg_type":"VARCHAR(16) DEFAULT 'text'",
+            "file_name":"VARCHAR(256)","enc_text":"TEXT","reply_to_id":"INTEGER",
+            "reply_preview":"VARCHAR(256)","reactions":"TEXT","pinned":"BOOLEAN DEFAULT 0",
+            "is_read":"BOOLEAN DEFAULT 0","is_delivered":"BOOLEAN DEFAULT 0",
+            "edited":"BOOLEAN DEFAULT 0","deleted_for_all":"BOOLEAN DEFAULT 0"
+        },
+        "groups": {"avatar_b64":"TEXT"},
+    }
+    with engine.connect() as conn:
+        from sqlalchemy import text as _t
+        for tbl, cols in migs.items():
+            if tbl not in insp.get_table_names(): continue
+            existing = {c["name"] for c in insp.get_columns(tbl)}
+            for col, ddl in cols.items():
+                if col not in existing:
+                    try:
+                        conn.execute(_t(f"ALTER TABLE {tbl} ADD COLUMN {col} {ddl}"))
+                        conn.commit()
+                    except Exception as e:
+                        logger.warning("mig %s.%s: %s", tbl, col, e)
+_auto_migrate()
+
+app = FastAPI(title="Алабуга Политех")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
+
+_frontend = pathlib.Path(__file__).parent.parent.parent / "frontend"
+if _frontend.exists():
+    app.mount("/app", StaticFiles(directory=str(_frontend), html=True), name="frontend")
+
+@app.get("/", include_in_schema=False)
+def root(): return RedirectResponse(url="/app/")
+
+@app.get("/healthz", include_in_schema=False)
+def healthz(): return {"status": "ok"}
+
+# ── helpers ───────────────────────────────────────────────────
+def _uid(authorization: Optional[str] = Header(None)) -> int:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(401, "Not authenticated")
+    p = verify_token(authorization.split(" ",1)[1])
+    if not p: raise HTTPException(401, "Invalid or expired token")
+    return p["user_id"]
+
+def _user(uid: int, db: Session) -> User:
+    u = db.query(User).filter(User.id==uid).first()
+    if not u: raise HTTPException(404, "User not found")
+    return u
+
+PHONE_RE = re.compile(r'^\+7\d{10}$')
+def norm_phone(raw: str) -> Optional[str]:
+    if not raw: return None
+    d = re.sub(r'\D','',raw)
+    if d.startswith('8'): d = '7'+d[1:]
+    if d.startswith('9') and len(d)==10: d = '7'+d
+    if not d.startswith('7') or len(d)!=11: return None
+    return '+'+d
+
+PW_RE = re.compile(r'^[A-Za-z0-9!@#$%^&*()_\-+=\[\]{};:,.<>?/\\|~`\'"]+$')
+def check_password(p: str):
+    if len(p) < 8: raise HTTPException(422, "Пароль минимум 8 символов")
+    if len(p) > 64: raise HTTPException(422, "Пароль максимум 64 символа")
+    if not PW_RE.match(p): raise HTTPException(422, "Пароль: только латиница, цифры и символы")
+
+def iso_utc(ts: dt.datetime) -> str:
+    if ts.tzinfo is None: ts = ts.replace(tzinfo=dt.timezone.utc)
+    return ts.isoformat()
+
+# ── schemas ───────────────────────────────────────────────────
+class PhoneCheck(BaseModel): phone: str
+class RegisterIn(BaseModel):
+    phone: str; username: str; password: str
+    display_name: Optional[str] = None
+class LoginIn(BaseModel): login: str; password: str
+class RecoverIn(BaseModel): phone: str; new_password: str
+class ProfileUpd(BaseModel):
+    display_name: Optional[str]=None; avatar_emoji: Optional[str]=None
+    avatar_color: Optional[str]=None; avatar_b64: Optional[str]=None
+    theme: Optional[str]=None; ui_scale: Optional[str]=None
+    birth_date: Optional[str]=None; folders: Optional[str]=None
+    hide_online: Optional[bool]=None; hide_phone: Optional[bool]=None
+class GroupIn(BaseModel):
+    name: str; avatar_emoji: Optional[str]="👥"; avatar_b64: Optional[str]=None
+    member_ids: List[int]=[]
+class MsgEdit(BaseModel): text: str
+class PinChat(BaseModel): chat_key: str; pinned: bool
+class ReactIn(BaseModel): emoji: str
+class FavIn(BaseModel): msg_id: int; add: bool
+class ReadIn(BaseModel): msg_id: int
+class TypingIn(BaseModel):
+    recipient_id: Optional[int]=None
+    group_id: Optional[int]=None
+    typing: bool=True
+
+def _user_pub(u: User, viewer_id: int = None):
+    show_phone = not u.hide_phone or viewer_id == u.id
+    return {"id":u.id,"username":u.username,"display_name":u.display_name or u.username,
+            "avatar_emoji":u.avatar_emoji or "😊","avatar_color":u.avatar_color or "#2E86DE",
+            "avatar_b64":u.avatar_b64,
+            "phone": u.phone if show_phone else None,
+            "birth_date":u.birth_date,
+            "hide_online": bool(u.hide_online)}
+
+def _me_payload(u: User, token=None):
+    d = {**_user_pub(u, u.id),
+         "theme":u.theme or "dark","ui_scale":u.ui_scale or "100",
+         "pinned_chats":u.pinned_chats or "","folders":u.folders or "{}",
+         "hide_online": bool(u.hide_online), "hide_phone": bool(u.hide_phone),
+         "favorites": u.favorites or "[]"}
+    if token: d["token"]=token; d["user_id"]=u.id
+    return d
+
+# ── AUTH ──────────────────────────────────────────────────────
+@app.post("/api/check_phone")
+def check_phone(data: PhoneCheck, db: Session = Depends(get_db)):
+    ph = norm_phone(data.phone)
+    if not ph: raise HTTPException(422, "Номер должен начинаться с +7 или 8/9 и содержать 11 цифр")
+    u = db.query(User).filter(User.phone==ph).first()
+    return {"exists": bool(u), "phone": ph, "username": u.username if u else None}
+
+@app.post("/api/register", status_code=201)
+def register(data: RegisterIn, db: Session = Depends(get_db)):
+    ph = norm_phone(data.phone)
+    if not ph: raise HTTPException(422, "Некорректный номер")
+    un = data.username.strip()
+    if len(un)<3: raise HTTPException(422, "Username минимум 3 символа")
+    if not re.match(r'^[A-Za-z0-9_]+$', un): raise HTTPException(422, "Username: латиница, цифры, _")
+    check_password(data.password)
+    if db.query(User).filter(User.phone==ph).first(): raise HTTPException(400, "Телефон уже зарегистрирован")
+    if db.query(User).filter(User.username==un).first(): raise HTTPException(400, "Username занят")
+    u = User(username=un, phone=ph, hashed_password=hash_password(data.password),
+             display_name=(data.display_name or un).strip())
+    db.add(u); db.commit(); db.refresh(u)
+    token = create_access_token({"user_id":u.id,"username":u.username})
+    return _me_payload(u, token)
+
+@app.post("/api/login")
+def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
+    lg = data.login.strip()
+    ph = norm_phone(lg)
+    u = None
+    if ph: u = db.query(User).filter(User.phone==ph).first()
+    if not u: u = db.query(User).filter(User.username==lg).first()
+    if not u or not verify_password(data.password, u.hashed_password):
+        raise HTTPException(401, "Неверный логин или пароль")
+    token = create_access_token({"user_id":u.id,"username":u.username})
+    # сохраняем сессию
+    try:
+        ua = request.headers.get("User-Agent","")
+        ip = request.client.host if request.client else "?"
+        sessions = json.loads(u.sessions or "[]")
+        sessions.append({"ip":ip,"ua":ua[:120],"ts":iso_utc(dt.datetime.now(dt.timezone.utc)),"token_prefix":token[:10]})
+        if len(sessions) > 10: sessions = sessions[-10:]
+        u.sessions = json.dumps(sessions)
+        db.commit()
+    except Exception: pass
+    return _me_payload(u, token)
+
+@app.post("/api/recover")
+def recover(data: RecoverIn, db: Session = Depends(get_db)):
+    ph = norm_phone(data.phone)
+    if not ph: raise HTTPException(422, "Некорректный номер")
+    u = db.query(User).filter(User.phone==ph).first()
+    if not u: raise HTTPException(404, "Пользователь с таким номером не найден")
+    check_password(data.new_password)
+    u.hashed_password = hash_password(data.new_password)
+    db.commit()
+    return {"status":"ok","username":u.username}
+
+# ── PROFILE ───────────────────────────────────────────────────
+@app.get("/api/me")
+def me(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    return _me_payload(_user(uid, db))
+
+@app.patch("/api/me")
+def upd_me(d: ProfileUpd, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    for f in ("display_name","avatar_emoji","avatar_color","avatar_b64","theme","ui_scale",
+              "birth_date","folders","hide_online","hide_phone"):
+        v = getattr(d, f)
+        if v is not None: setattr(u, f, v)
+    db.commit()
+    return {"status":"ok"}
+
+@app.get("/api/users/{user_id}")
+def user_profile(user_id: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    return _user_pub(_user(user_id, db), uid)
+
+@app.get("/api/users")
+def users(q: str = "", db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    qs = db.query(User)
+    if q:
+        like = f"%{q}%"
+        qs = qs.filter(or_(User.username.ilike(like), User.display_name.ilike(like)))
+    return [_user_pub(u, uid) for u in qs.limit(50).all()]
+
+@app.get("/api/sessions")
+def get_sessions(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    try: return json.loads(u.sessions or "[]")
+    except: return []
+
+@app.post("/api/sessions/clear")
+def clear_sessions(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    # оставляем только последнюю сессию
+    try:
+        sessions = json.loads(u.sessions or "[]")
+        if sessions: sessions = [sessions[-1]]
+    except: sessions = []
+    u.sessions = json.dumps(sessions)
+    db.commit()
+    return {"status":"ok","remaining":len(sessions)}
+
+@app.post("/api/pin")
+def pin(d: PinChat, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    pins = set((u.pinned_chats or "").split(","))-{""}
+    (pins.add if d.pinned else pins.discard)(d.chat_key)
+    u.pinned_chats = ",".join(pins); db.commit()
+    return {"pinned_chats": u.pinned_chats}
+
+# ── FAVORITES ─────────────────────────────────────────────────
+@app.post("/api/favorites")
+def toggle_fav(d: FavIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    try: favs = json.loads(u.favorites or "[]")
+    except: favs = []
+    if d.add:
+        if d.msg_id not in favs: favs.append(d.msg_id)
+    else:
+        favs = [x for x in favs if x != d.msg_id]
+    u.favorites = json.dumps(favs); db.commit()
+    return {"favorites": favs}
+
+@app.get("/api/favorites")
+def get_favs(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    try: fav_ids = json.loads(u.favorites or "[]")
+    except: fav_ids = []
+    msgs = db.query(Message).filter(Message.id.in_(fav_ids),
+                                    Message.deleted_for_all==False).all()
+    return [_mdict(m) for m in msgs]
+
+# ── TYPING ────────────────────────────────────────────────────
+@app.post("/api/typing")
+async def typing(d: TypingIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    u = _user(uid, db)
+    ev = {"event":"typing","sender_id":uid,"display_name":u.display_name or u.username,
+          "typing":d.typing,"group_id":d.group_id,"recipient_id":d.recipient_id}
+    if d.group_id:
+        for mem in db.query(GroupMember).filter(GroupMember.group_id==d.group_id,
+                                                 GroupMember.user_id!=uid).all():
+            await manager.send_encrypted_message(ev, mem.user_id)
+    elif d.recipient_id:
+        await manager.send_encrypted_message(ev, d.recipient_id)
+    return {"ok":True}
+
+# ── CHATS ─────────────────────────────────────────────────────
+@app.get("/api/chats")
+def chats(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    partner_ids = set()
+    for m in db.query(Message.sender_id, Message.recipient_id).filter(
+        Message.group_id==None,
+        or_(Message.sender_id==uid, Message.recipient_id==uid)).all():
+        partner_ids.add(m[0] if m[0]!=uid else m[1])
+    partner_ids.discard(uid); partner_ids.discard(None)
+    out = []
+    for pid in partner_ids:
+        u = db.query(User).filter(User.id==pid).first()
+        if not u: continue
+        last = db.query(Message).filter(Message.group_id==None, or_(
+            and_(Message.sender_id==uid, Message.recipient_id==pid),
+            and_(Message.sender_id==pid, Message.recipient_id==uid)
+        )).order_by(Message.timestamp.desc()).first()
+        unread = db.query(Message).filter(Message.sender_id==pid,
+            Message.recipient_id==uid, Message.is_read==False,
+            Message.deleted_for_all==False).count()
+        # черновики хранятся на клиенте
+        last_text = ""
+        if last and not last.deleted_for_all:
+            raw = dec(last.enc_text)
+            if last.msg_type == 'voice': last_text = '🎤 Голосовое'
+            elif last.msg_type == 'file': last_text = f'📎 {last.file_name or "Файл"}'
+            elif last.msg_type == 'image': last_text = '🖼️ Изображение'
+            else: last_text = raw[:60]
+        out.append({**_user_pub(u, uid), "chat_key":f"dm_{u.id}",
+            "last_text": last_text,
+            "last_ts": iso_utc(last.timestamp) if last else None, "unread": unread})
+    out.sort(key=lambda x: x["last_ts"] or "", reverse=True)
+    return out
+
+# ── MESSAGES ──────────────────────────────────────────────────
+def _mdict(m: Message, db: Session = None):
+    text = "" if m.deleted_for_all else dec(m.enc_text)
+    return {"id":m.id,"sender_id":m.sender_id,"recipient_id":m.recipient_id,
+            "group_id":m.group_id,"text":text,"msg_type":m.msg_type,
+            "file_name":m.file_name,"reply_to_id":m.reply_to_id,
+            "reply_preview": dec(m.reply_preview) if m.reply_preview else None,
+            "reactions": json.loads(m.reactions or "{}"),
+            "pinned":m.pinned,"is_read":m.is_read,"is_delivered":m.is_delivered,
+            "edited":m.edited,"deleted":m.deleted_for_all,
+            "timestamp":iso_utc(m.timestamp)}
+
+@app.get("/api/messages/{other}")
+def dm_history(other: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    msgs = db.query(Message).filter(Message.group_id==None, or_(
+        and_(Message.sender_id==uid, Message.recipient_id==other),
+        and_(Message.sender_id==other, Message.recipient_id==uid)
+    )).order_by(Message.timestamp.asc()).all()
+    for m in msgs:
+        if m.recipient_id==uid and not m.is_read:
+            m.is_read=True
+        if m.sender_id==uid and not m.is_delivered:
+            m.is_delivered=True
+    db.commit()
+    return [_mdict(m) for m in msgs]
+
+@app.post("/api/messages/{mid}/read")
+async def mark_read(mid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    # Mark this message and all older unread messages from same sender as read
+    m = db.query(Message).filter(Message.id==mid, Message.recipient_id==uid).first()
+    if not m:
+        return {"ok": True}
+    sender_id = m.sender_id
+    # find all unread messages from this sender to uid up to mid
+    unread_msgs = db.query(Message).filter(
+        Message.recipient_id==uid, Message.sender_id==sender_id,
+        Message.is_read==False, Message.id<=mid
+    ).all()
+    for msg in unread_msgs:
+        msg.is_read = True
+    db.commit()
+    # notify sender once with the highest message id
+    ev = {"event":"read","msg_id":mid,"reader_id":uid}
+    await manager.send_encrypted_message(ev, sender_id)
+    return {"ok": True, "marked": len(unread_msgs)}
+
+@app.get("/api/groups/{gid}/messages")
+def grp_history(gid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    if not db.query(GroupMember).filter_by(group_id=gid, user_id=uid).first():
+        raise HTTPException(403, "Not a member")
+    msgs = db.query(Message).filter(Message.group_id==gid).order_by(Message.timestamp.asc()).all()
+    # помечаем доставленными
+    for m in msgs:
+        if m.sender_id != uid and not m.is_delivered:
+            m.is_delivered = True
+    db.commit()
+    return [_mdict(m) for m in msgs]
+
+@app.delete("/api/messages/{mid}")
+async def del_msg(mid: int, for_all: bool = False,
+            db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    m = db.query(Message).filter(Message.id==mid).first()
+    if not m: raise HTTPException(404, "Сообщение не найдено")
+    now = dt.datetime.now(dt.timezone.utc)
+    ts = m.timestamp if m.timestamp.tzinfo else m.timestamp.replace(tzinfo=dt.timezone.utc)
+    age = (now-ts).total_seconds()
+    if for_all:
+        if m.sender_id != uid: raise HTTPException(403, "Удалить у всех может только отправитель")
+        m.deleted_for_all = True; db.commit()
+        ev = {"event":"deleted","id":m.id,"group_id":m.group_id,"recipient_id":m.recipient_id,"sender_id":m.sender_id}
+        if m.group_id:
+            for mem in db.query(GroupMember).filter(GroupMember.group_id==m.group_id).all():
+                await manager.send_encrypted_message(ev, mem.user_id)
+        else:
+            await manager.send_encrypted_message(ev, m.recipient_id)
+            await manager.send_encrypted_message(ev, m.sender_id)
+        return {"status":"deleted_for_all"}
+    if m.sender_id==uid or (m.recipient_id==uid and age<=7200):
+        db.delete(m); db.commit()
+        return {"status":"deleted"}
+    raise HTTPException(403, "Можно удалить только в течение 2 часов")
+
+@app.patch("/api/messages/{mid}")
+def edit_msg(mid: int, d: MsgEdit, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    m = db.query(Message).filter(Message.id==mid, Message.sender_id==uid).first()
+    if not m: raise HTTPException(404, "Сообщение не найдено или не ваше")
+    now = dt.datetime.now(dt.timezone.utc)
+    ts = m.timestamp if m.timestamp.tzinfo else m.timestamp.replace(tzinfo=dt.timezone.utc)
+    if (now-ts).total_seconds() > 86400: raise HTTPException(403, "Редактирование доступно 24 часа")
+    m.enc_text = enc(d.text); m.edited = True; db.commit(); db.refresh(m)
+    return _mdict(m)
+
+@app.post("/api/messages/{mid}/pin")
+def pin_msg(mid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    m = db.query(Message).filter(Message.id==mid).first()
+    if not m: raise HTTPException(404, "Не найдено")
+    m.pinned = not m.pinned; db.commit()
+    return {"pinned": m.pinned}
+
+@app.post("/api/messages/{mid}/react")
+def react(mid: int, d: ReactIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    m = db.query(Message).filter(Message.id==mid).first()
+    if not m: raise HTTPException(404, "Не найдено")
+    r = json.loads(m.reactions or "{}")
+    lst = r.get(d.emoji, [])
+    if uid in lst: lst.remove(uid)
+    else: lst.append(uid)
+    if lst: r[d.emoji]=lst
+    elif d.emoji in r: del r[d.emoji]
+    m.reactions = json.dumps(r); db.commit()
+    return {"reactions": r}
+
+@app.get("/api/pinned/{chat_type}/{chat_id}")
+def pinned_msgs(chat_type: str, chat_id: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    q = db.query(Message).filter(Message.pinned==True, Message.deleted_for_all==False)
+    if chat_type=="g": q = q.filter(Message.group_id==chat_id)
+    else: q = q.filter(Message.group_id==None, or_(
+        and_(Message.sender_id==uid, Message.recipient_id==chat_id),
+        and_(Message.sender_id==chat_id, Message.recipient_id==uid)))
+    return [_mdict(m) for m in q.order_by(Message.timestamp.asc()).all()]
+
+# ── FILES ─────────────────────────────────────────────────────
+_updir = pathlib.Path(__file__).parent.parent.parent / "uploads"
+_updir.mkdir(exist_ok=True)
+
+IMAGE_EXTS = {'jpg','jpeg','png','gif','webp','bmp','svg'}
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...), uid: int = Depends(_uid)):
+    content = await file.read()
+    if len(content) > 20*1024*1024: raise HTTPException(413, "Максимум 20 МБ")
+    ext = (file.filename.split('.')[-1] or '').lower()
+    msg_type = 'image' if ext in IMAGE_EXTS else 'file'
+    return {"file_name": file.filename,
+            "data_b64": base64.b64encode(content).decode(),
+            "size": len(content),
+            "msg_type": msg_type,
+            "mime": file.content_type or "application/octet-stream"}
+
+# ── GROUPS ────────────────────────────────────────────────────
+@app.post("/api/groups", status_code=201)
+def mk_group(d: GroupIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    if len(d.name.strip())<2: raise HTTPException(422, "Название слишком короткое")
+    g = Group(name=d.name.strip(), creator_id=uid, avatar_emoji=d.avatar_emoji, avatar_b64=d.avatar_b64)
+    db.add(g); db.flush()
+    for mid in set([uid]+d.member_ids):
+        if db.query(User).filter(User.id==mid).first():
+            db.add(GroupMember(group_id=g.id, user_id=mid, is_admin=(mid==uid)))
+    db.commit(); db.refresh(g)
+    return {"id":g.id,"name":g.name,"avatar_emoji":g.avatar_emoji}
+
+@app.get("/api/groups")
+def my_groups(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    out=[]
+    for gm in db.query(GroupMember).filter(GroupMember.user_id==uid).all():
+        g = db.query(Group).filter(Group.id==gm.group_id).first()
+        if g:
+            cnt = db.query(GroupMember).filter(GroupMember.group_id==g.id).count()
+            last = db.query(Message).filter(Message.group_id==g.id).order_by(Message.timestamp.desc()).first()
+            unread = db.query(Message).filter(Message.group_id==g.id,
+                Message.sender_id!=uid, Message.is_read==False,
+                Message.deleted_for_all==False).count()
+            last_text = ""
+            if last and not last.deleted_for_all:
+                if last.msg_type == 'voice': last_text = '🎤 Голосовое'
+                elif last.msg_type == 'file': last_text = f'📎 {last.file_name or "Файл"}'
+                elif last.msg_type == 'image': last_text = '🖼️ Изображение'
+                else: last_text = dec(last.enc_text)[:60]
+            out.append({"id":g.id,"name":g.name,"avatar_emoji":g.avatar_emoji,
+                        "avatar_b64":g.avatar_b64,"member_count":cnt,"is_admin":gm.is_admin,
+                        "last_text":last_text,
+                        "last_ts":iso_utc(last.timestamp) if last else None,
+                        "unread":unread})
+    return out
+
+@app.get("/api/groups/{gid}/members")
+def grp_members(gid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    if not db.query(GroupMember).filter_by(group_id=gid, user_id=uid).first():
+        raise HTTPException(403, "Not a member")
+    out=[]
+    for gm in db.query(GroupMember).filter(GroupMember.group_id==gid).all():
+        u = db.query(User).filter(User.id==gm.user_id).first()
+        if u: out.append({**_user_pub(u, uid), "is_admin":gm.is_admin})
+    return out
+
+# ── ONLINE STATUS ─────────────────────────────────────────────
+@app.get("/api/online")
+def online_users(db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    online = manager.get_online_users()
+    # фильтруем тех, кто скрыл статус
+    result = {}
+    for oid in online:
+        u = db.query(User).filter(User.id==oid).first()
+        if u and not u.hide_online:
+            result[oid] = True
+        elif u and u.id == uid:
+            result[oid] = True  # себя всегда показываем себе
+    return result
+
+# ── WEBSOCKET ─────────────────────────────────────────────────
+@app.websocket("/ws/{token}")
+async def ws(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
+    p = verify_token(token)
+    if not p:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION); return
+    uid = p["user_id"]
+    await manager.connect(uid, websocket)
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try: msg = json.loads(raw)
+            except Exception: continue
+            text  = str(msg.get("text",""))[:50000]
+            mtype = msg.get("msg_type","text")
+            fname = msg.get("file_name")
+            gid   = msg.get("group_id")
+            rid   = msg.get("recipient_id")
+            tmp   = msg.get("temp_id")
+            r2id  = msg.get("reply_to_id")
+            r2pv  = (msg.get("reply_preview") or "")[:200]
+            if not text: continue
+
+            kw = dict(sender_id=uid, enc_text=enc(text), msg_type=mtype, file_name=fname,
+                      reply_to_id=r2id, reply_preview=enc(r2pv) if r2pv else None,
+                      is_delivered=True)
+            if gid:
+                gid=int(gid)
+                if not db.query(GroupMember).filter_by(group_id=gid,user_id=uid).first(): continue
+                m = Message(group_id=gid, **kw)
+                db.add(m); db.commit(); db.refresh(m)
+                out = {**_mdict(m), "event":"message", "temp_id":tmp}
+                for mem in db.query(GroupMember).filter(GroupMember.group_id==gid).all():
+                    await manager.send_encrypted_message(out, mem.user_id)
+            elif rid:
+                rid=int(rid)
+                if not db.query(User).filter(User.id==rid).first(): continue
+                m = Message(recipient_id=rid, **kw)
+                db.add(m); db.commit(); db.refresh(m)
+                out = {**_mdict(m), "event":"message", "temp_id":tmp}
+                await manager.send_encrypted_message(out, rid)
+                await manager.send_encrypted_message(out, uid)
+    except WebSocketDisconnect:
+        await manager.disconnect(uid)
+    except Exception as e:
+        logger.error("WS %s: %s", uid, e)
+        await manager.disconnect(uid)

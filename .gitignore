@@ -1,0 +1,30 @@
+# Окружение и зависимости
+.venv/
+env/
+venv/
+ENV/
+
+# База данных проекта
+../backend/messenger.db
+
+# Кэш Python (чтобы больше никогда не вылезал)
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Настройки среды разработки PyCharm
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Мусор операционной системы
+.DS_Store
+Thumbs.db
+
+# База данных проекта
+messenger.db
+backend/messenger.db
