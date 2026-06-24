@@ -7,7 +7,7 @@ const API = location.origin + '/api';
 let ME = null, NET = null, ACTIVE = null;
 let OPEN_SEQ = 0;  // guards async message loads when switching chats quickly
 let CHATS = [], GROUPS = [], SEARCH_RES = [], UNREAD = {}, PINS = new Set(), FOLDERS = {}, CUR_FOLDER = 'Все';
-let FS = 14, SOUND = true;
+let FS = 16, SOUND = true;
 let AUTH_PHONE = '', PENDING = null;
 let selGM = new Set(), selGE = '👥', selGAvB64 = null, myAvB64Pending = null;
 let REPLY = null;
@@ -46,7 +46,7 @@ let refreshIntervalId = null;
 /* ═══ EMOJI DATA ═══ */
 const EPC = [
   {i:'😀',e:['😀','😃','😄','😁','😆','😅','😂','🤣','🥲','☺️','😊','😇','🙂','🙃','😉','😌','😍','🥰','😘','😗','😙','😋','😛','😝','😜','🤪','🤨','🧐','🤓','😎','🥸','🤩','🥳','😏','😒','😞','😔','😟','😕','🙁','☹️','😣','😖','😫','😩','🥺','😢','😭','😤','😠','😡','🤬','🤯','😳','🥵','🥶','😱','😨','😰','😥','😓','🤗','🤔','🫣','🤭','🫢','🤫','😶','😐','😑','😬','🙄','😯','😴','🤤','😪','😵','🤐','🥴','🤢','🤮','🤧','😷','🤒','🤕','🤑','🤠','😈','👿','💩','👻','💀','☠️','👽','👾','🤖']},
-  {i:'👋',e:['👋','🤚','🖐','✋','🖖','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🤝','🙏','✍️','💅','💪','🦾']},
+  {i:'👋',e:['👋','🤚','🖐','✋','🖖','👌','🤌','🤏','✌️','🤞','🫰','🤟','🤘','🤙','👈','👉','👆','👇','☝️','👍','👎','✊','👊','🤛','🤜','👏','🙌','🫶','👐','🤲','🤝','🙏','✍️','💅','💪','🦾','👶','🧒','👦','👧','🧑','👨','👩','🧔','👱','👴','👵','🙍','🙎','🙅','🙆','💁','🙋','🧏','🙇','🤦','🤷','👮','🕵️','💂','👷','🤴','👸','👳','👲','🧕','🤵','👰','🤰','🤱','👼','🎅','🤶','🦸','🦹','🧙','🧚','🧛','🧜','🧝','🧞','🧟','💆','💇','🚶','🧍','🧎','🏃','💃','🕺','🧑‍⚕️','🧑‍🎓','🧑‍🏫','🧑‍💻','🧑‍🍳','🧑‍🔧','🧑‍🚀','🧑‍🎤','🧑‍🎨']},
   {i:'❤️',e:['❤️','🧡','💛','💚','💙','💜','🖤','🤍','🤎','💔','❤️‍🔥','❤️‍🩹','❣️','💕','💞','💓','💗','💖','💘','💝','💟','💌','💤','💢','💣','💥','💦','💫','🌟','⭐','✨','⚡','🔥','💯']},
   {i:'🐶',e:['🐶','🐱','🐭','🐹','🐰','🦊','🐻','🐼','🐨','🐯','🦁','🐮','🐷','🐸','🐵','🙈','🙉','🙊','🐒','🐔','🐧','🐦','🐤','🦆','🦅','🦉','🐺','🐴','🦄','🐝','🐛','🦋','🐌','🐞','🐜','🐢','🐍','🦎','🐙','🦑','🦐','🦀','🐠','🐟','🐬','🐳','🦈']},
   {i:'🍏',e:['🍏','🍎','🍐','🍊','🍋','🍌','🍉','🍇','🍓','🫐','🍒','🍑','🥭','🍍','🥥','🥝','🍅','🥑','🥦','🥬','🥒','🌶','🌽','🥕','🍞','🥐','🥖','🧀','🥚','🍳','🥞','🧇','🍗','🍖','🌭','🍔','🍟','🍕','🍣','🍱','🧁','🍰','🎂','🍭','🍬','🍫','🍿','☕','🍵','🧃','🥤','🧋','🍺','🍷','🥃']},
@@ -152,6 +152,16 @@ function pickMutedText(panelBg, light, min = 4.0) {
   }
   return light ? '#4A4A4A' : '#B0BBC6';
 }
+function bubbleMetaColors(bubbleBg, accent) {
+  const lightBubble = isLightBg(bubbleBg);
+  const meta = pickMutedText(bubbleBg, lightBubble, 3.2);
+  const tick = pickMutedText(bubbleBg, lightBubble, 2.6);
+  const tickDel = pickMutedText(bubbleBg, lightBubble, 3.0);
+  let tickRead = accent || '#3390EC';
+  if (contrastRatio(tickRead, bubbleBg) < 2.5) tickRead = lightBubble ? shadeHex(tickRead, -24) : mixHex(tickRead, '#FFFFFF', 0.35);
+  if (contrastRatio(tickRead, bubbleBg) < 2.5) tickRead = lightBubble ? '#2481CC' : '#53B8F6';
+  return { meta, tick, tickDel, tickRead };
+}
 function ensureBubbleColor(color, chatBg, light, accent) {
   if (contrastRatio(color, chatBg) >= 1.45) return color;
   if (light) return mixHex(accent || color, '#FFFFFF', 0.62);
@@ -191,8 +201,14 @@ function buildThemePalette(t) {
   const t2 = pickMutedText(headBg, light, 4.2);
   const t3 = pickMutedText(headBg, light, 3.0);
   const brd = light ? 'rgba(0,0,0,.14)' : 'rgba(255,255,255,.12)';
+  const outMeta = bubbleMetaColors(outB, acc);
+  const inMeta = bubbleMetaColors(inB, acc);
 
-  return { bg, headBg, sbBg, railBg, bg2, bg3, bg4, searchBg, hoverBg, inB, outB, inT, outT, acc, active, t1, t2, t3, brd, light };
+  return {
+    bg, headBg, sbBg, railBg, bg2, bg3, bg4, searchBg, hoverBg, inB, outB, inT, outT, acc, active, t1, t2, t3, brd, light,
+    bubMetaOut: outMeta.meta, bubMetaOutTick: outMeta.tick, bubMetaOutTickDel: outMeta.tickDel, bubMetaOutTickRead: outMeta.tickRead,
+    bubMetaInMsg: inMeta.meta,
+  };
 }
 function buildThemePicker() {
   const c = document.getElementById('chat-themes');
@@ -248,6 +264,11 @@ function setChatTheme(id, save = true) {
   root.style.setProperty('--acc', p.acc);
   root.style.setProperty('--acc-d', shadeHex(p.acc, -22));
   root.style.setProperty('--acc-g', rgb ? `rgba(${rgb.r},${rgb.g},${rgb.b},.18)` : 'rgba(51,144,236,.18)');
+  root.style.setProperty('--bub-meta-out', p.bubMetaOut);
+  root.style.setProperty('--bub-meta-out-tick', p.bubMetaOutTick);
+  root.style.setProperty('--bub-meta-out-tick-del', p.bubMetaOutTickDel);
+  root.style.setProperty('--bub-meta-out-tick-read', p.bubMetaOutTickRead);
+  root.style.setProperty('--bub-meta-in-msg', p.bubMetaInMsg);
   applyChatBg();
   buildThemePicker();
 }
@@ -506,10 +527,10 @@ async function stepPhone() {
     if (r.exists) {
       document.getElementById('login-sub').textContent = `Аккаунт @${r.username}`;
       showStep('as-login');
-      setTimeout(() => document.getElementById('a-pw-login').focus(), 60);
+      setTimeout(() => document.getElementById('a-pw-login').focus(), 20);
     } else {
       showStep('as-reg');
-      setTimeout(() => document.getElementById('a-dn').focus(), 60);
+      setTimeout(() => document.getElementById('a-dn').focus(), 20);
     }
   } catch (e) { toast(e.message, 'e'); }
   finally { btnLoad('btn-phone', false); }
@@ -722,6 +743,12 @@ async function refreshAll() {
   try {
     const [chats, groups] = await Promise.all([req('/chats'), req('/groups')]);
     CHATS = chats; GROUPS = groups;
+    chats.forEach(c => {
+      if (c.is_saved || !c.id) return;
+      if (c.online) onlineUsers.add(c.id);
+      else onlineUsers.delete(c.id);
+      if (c.last_seen) lastSeenMap[c.id] = c.last_seen;
+    });
     CHATS.forEach(c => { delete UNREAD[c.chat_key]; });
     GROUPS.forEach(g => { delete UNREAD[`g_${g.id}`]; });
     await refreshOnline();
@@ -808,10 +835,140 @@ function touchChatRow(chat, preview, ts) {
 function sortByLastTs(items) {
   return items.sort((a, b) => (b.last_ts || '').localeCompare(a.last_ts || ''));
 }
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const rd = new FileReader();
+    rd.onload = () => resolve(rd.result);
+    rd.onerror = () => reject(rd.error || new Error('read'));
+    rd.readAsDataURL(file);
+  });
+}
+
+const FILE_MIME = {
+  pdf: 'application/pdf', txt: 'text/plain', html: 'text/html', htm: 'text/html',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  zip: 'application/zip', rar: 'application/x-rar-compressed', '7z': 'application/x-7z-compressed',
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
+  bmp: 'image/bmp', svg: 'image/svg+xml', mp4: 'video/mp4', webm: 'video/webm',
+  mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+};
+function mimeFromExt(ext) {
+  return FILE_MIME[(ext || '').toLowerCase()] || 'application/octet-stream';
+}
+function normalizeFileSrc(text, fname) {
+  if (!text || text.startsWith('🔒')) return null;
+  if (text.startsWith('data:') || text.startsWith('blob:')) return text;
+  const trimmed = text.replace(/\s/g, '');
+  if (/^[A-Za-z0-9+/=]{40,}$/.test(trimmed)) {
+    const ext = (fname || '').split('.').pop();
+    return `data:${mimeFromExt(ext)};base64,${trimmed}`;
+  }
+  return null;
+}
+function isBrowserViewable(fname, mime) {
+  const ext = (fname || '').split('.').pop().toLowerCase();
+  if (['pdf', 'txt', 'html', 'htm', 'svg', 'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'mp4', 'webm', 'mp3', 'wav', 'ogg'].includes(ext)) return true;
+  const m = mime || mimeFromExt(ext);
+  return m.startsWith('image/') || m.startsWith('text/') || m.startsWith('audio/') || m.startsWith('video/') || m === 'application/pdf';
+}
+async function blobFromSrc(src) {
+  const r = await fetch(src);
+  if (!r.ok) throw new Error('fetch failed');
+  return r.blob();
+}
+function downloadBlob(blob, fname) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fname || 'file';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+async function downloadFile(src, fname) {
+  const normalized = normalizeFileSrc(src, fname);
+  if (!normalized) { toast('Файл недоступен', 'e'); return; }
+  try {
+    const blob = await blobFromSrc(normalized);
+    downloadBlob(blob, fname || 'file');
+  } catch {
+    toast('Не удалось скачать файл', 'e');
+  }
+}
+async function openFile(src, fname) {
+  const normalized = normalizeFileSrc(src, fname);
+  if (!normalized) { toast('Файл недоступен', 'e'); return; }
+  try {
+    const blob = await blobFromSrc(normalized);
+    const mime = blob.type || mimeFromExt((fname || '').split('.').pop());
+    if (isBrowserViewable(fname, mime)) {
+      const url = URL.createObjectURL(blob);
+      const w = window.open(url, '_blank', 'noopener');
+      if (!w) {
+        URL.revokeObjectURL(url);
+        downloadBlob(blob, fname || 'file');
+      } else {
+        setTimeout(() => URL.revokeObjectURL(url), 120000);
+      }
+    } else {
+      downloadBlob(blob, fname || 'file');
+    }
+  } catch {
+    toast('Не удалось открыть — скачиваем…', 'i');
+    await downloadFile(normalized, fname);
+  }
+}
+function downloadData(dataUrl, fname) {
+  downloadFile(dataUrl, fname);
+}
+function dataURLtoBlob(dataUrl) {
+  const [head, b64] = dataUrl.split(',');
+  const mime = (head.match(/data:([^;]+)/) || [, 'application/octet-stream'])[1];
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return new Blob([arr], { type: mime });
+}
+
+function patchTempBubbleImage(tmpOrId, src, m) {
+  if (!src) return;
+  const tb = document.querySelector(
+    typeof tmpOrId === 'string' && String(tmpOrId).startsWith('t')
+      ? `.bub[data-tmp="${tmpOrId}"]`
+      : `.bub[data-id="${tmpOrId}"]`
+  );
+  if (!tb || (m?.msg_type && m.msg_type !== 'image')) return;
+
+  tb.querySelector('.fb')?.remove();
+
+  let img = tb.querySelector('.img-bub');
+  if (!img) {
+    img = document.createElement('img');
+    img.className = 'img-bub';
+    img.alt = m?.file_name || 'Изображение';
+    const before = tb.querySelector('.bub-media-foot') || tb.querySelector('.reacts');
+    tb.insertBefore(img, before);
+    if (m?.caption && !tb.querySelector('.bub-media-foot')) appendMediaCaption(tb, m, m.sender_id === ME.id);
+  }
+
+  img.onerror = null;
+  img.src = src;
+  img.onclick = e => {
+    e.stopPropagation();
+    if (SELECT_MODE && m?.id && m.id !== 'tmp') { toggleSelect(m); return; }
+    openLightbox(src, m?.file_name);
+  };
+}
+
 function confirmTempBubble(d) {
   if (!d.temp_id) return false;
   const tb = document.querySelector(`.bub[data-tmp="${d.temp_id}"]`);
   if (!tb) return false;
+  if (d.msg_type === 'image' && d.text) patchTempBubbleImage(d.temp_id, d.text, d);
   tb.dataset.id = d.id;
   tb.removeAttribute('data-tmp');
   const row = tb.closest('.mr');
@@ -822,7 +979,7 @@ function confirmTempBubble(d) {
   else if (bm) {
     const t = new Date(d.timestamp || Date.now());
     let meta = `<span>${fmtTime(t)}</span>`;
-    if (d.edited) meta += `<span style="font-style:italic;opacity:.7"> ред.</span>`;
+    if (d.edited) meta += `<span style="font-style:italic;opacity:.7"> изменено</span>`;
     meta += tickHtml(d);
     bm.innerHTML = meta;
   }
@@ -854,10 +1011,11 @@ function mergeMsgsIntoView(msgs, members) {
         else if (bm) {
           const t = new Date(m.timestamp || Date.now());
           let meta = `<span>${fmtTime(t)}</span>`;
-          if (m.edited) meta += `<span style="font-style:italic;opacity:.7"> ред.</span>`;
+          if (m.edited) meta += `<span style="font-style:italic;opacity:.7"> изменено</span>`;
           meta += tickHtml(m);
           bm.innerHTML = meta;
         }
+        if (m.msg_type === 'image' && m.text) patchTempBubbleImage(m.id, m.text, m);
         existing.add(m.id);
         return;
       }
@@ -884,21 +1042,90 @@ function startLiveSync() {
 
 /* ═══ PRESENCE (online status) ═══ */
 const onlineUsers = new Set();
+const lastSeenMap = {};
+let _lastSeenTimer = null;
 async function refreshOnline() {
   try {
-    const res = await req('/online');          // { uid: true, ... }
+    const res = await req('/online');
     onlineUsers.clear();
-    Object.keys(res || {}).forEach(id => onlineUsers.add(parseInt(id)));
+    Object.entries(res || {}).forEach(([id, v]) => {
+      const uid = parseInt(id, 10);
+      if (typeof v === 'object' && v !== null) {
+        if (v.online) onlineUsers.add(uid);
+        else onlineUsers.delete(uid);
+        if (v.last_seen) lastSeenMap[uid] = v.last_seen;
+      } else if (v) {
+        onlineUsers.add(uid);
+      }
+    });
   } catch {}
+}
+function fmtLastSeen(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const diff = Date.now() - d.getTime();
+  if (diff < 60000) return 'был(а) только что';
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `был(а) ${mins} ${plural(mins, ['минуту', 'минуты', 'минут'])} назад`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `был(а) ${hrs} ${plural(hrs, ['час', 'часа', 'часов'])} назад`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `был(а) ${days} ${plural(days, ['день', 'дня', 'дней'])} назад`;
+  return 'был(а) ' + d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+}
+function fmtReadAt(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return fmtTime(d);
+  const y = new Date(now); y.setDate(y.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'вчера в ' + fmtTime(d);
+  return d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) + ' в ' + fmtTime(d);
+}
+function startLastSeenTicker() {
+  if (_lastSeenTimer) clearInterval(_lastSeenTimer);
+  _lastSeenTimer = setInterval(() => {
+    if (ACTIVE?.type === 'dm' && !ACTIVE.saved && !CH_SUB_TYPING) updateActiveHeaderPresence();
+  }, 30000);
+}
+function stopLastSeenTicker() {
+  if (_lastSeenTimer) { clearInterval(_lastSeenTimer); _lastSeenTimer = null; }
+}
+let CH_SUB_STATIC = '';
+let CH_SUB_ONLINE = false;
+let CH_SUB_TYPING = false;
+function setChSub(text, online = false) {
+  CH_SUB_STATIC = text;
+  CH_SUB_ONLINE = online;
+  if (CH_SUB_TYPING) return;
+  const sub = document.getElementById('ch-sub');
+  if (!sub) return;
+  sub.className = 'ch-sub' + (online ? ' online' : '');
+  sub.textContent = text;
+}
+function showTypingInSub(name) {
+  CH_SUB_TYPING = true;
+  const sub = document.getElementById('ch-sub');
+  if (!sub) return;
+  sub.className = 'ch-sub typing';
+  const who = name && ACTIVE?.type === 'group' ? esc(name) + ' ' : '';
+  sub.innerHTML = `<span class="tg-typing-dots" aria-hidden="true"><span></span><span></span><span></span></span><span>${who}печатает</span>`;
+}
+function hideTypingInSub() {
+  if (!CH_SUB_TYPING) return;
+  CH_SUB_TYPING = false;
+  setChSub(CH_SUB_STATIC, CH_SUB_ONLINE);
 }
 function updateActiveHeaderPresence() {
   if (ACTIVE?.type !== 'dm' || ACTIVE.saved) return;
-  const sub = document.getElementById('ch-sub');
-  if (!sub) return;
   const partner = CHATS.find(c => c.id === ACTIVE.id) || ACTIVE.user;
-  if (partner && partner.hide_online) { sub.textContent = '@' + (partner.username || ''); sub.classList.remove('online'); return; }
-  if (onlineUsers.has(ACTIVE.id)) { sub.textContent = 'в сети'; sub.classList.add('online'); }
-  else { sub.textContent = partner ? '@' + (partner.username || '') : 'не в сети'; sub.classList.remove('online'); }
+  if (partner && partner.hide_online) { setChSub('@' + (partner.username || ''), false); return; }
+  if (onlineUsers.has(ACTIVE.id)) setChSub('в сети', true);
+  else {
+    const ls = lastSeenMap[ACTIVE.id] || partner?.last_seen;
+    if (ls) setChSub(fmtLastSeen(ls), false);
+    else setChSub(partner ? '@' + (partner.username || '') : 'не в сети', false);
+  }
 }
 
 /* ═══ WEBSOCKET ═══ */
@@ -925,7 +1152,10 @@ async function onWS(d) {
     const uid = parseInt(d.user_id, 10);
     if (!uid) return;
     if (d.online) onlineUsers.add(uid);
-    else onlineUsers.delete(uid);
+    else {
+      onlineUsers.delete(uid);
+      if (d.last_seen) lastSeenMap[uid] = d.last_seen;
+    }
     renderContacts();
     updateActiveHeaderPresence();
     return;
@@ -937,14 +1167,11 @@ async function onWS(d) {
     const relevant = (isG && ACTIVE?.type === 'group' && ACTIVE?.id === d.group_id) ||
       (!isG && ACTIVE?.type === 'dm' && !isActiveSaved() && ACTIVE?.id === d.sender_id);
     if (relevant) {
-      const ind = document.getElementById('typing-ind');
-      const nm = document.getElementById('typing-name');
       if (d.typing) {
-        nm.textContent = d.display_name;
-        ind.style.display = 'flex';
+        showTypingInSub(d.display_name);
         clearTimeout(_typingTimeouts[d.sender_id]);
-        _typingTimeouts[d.sender_id] = setTimeout(() => { ind.style.display = 'none'; }, 4500);
-      } else { ind.style.display = 'none'; }
+        _typingTimeouts[d.sender_id] = setTimeout(hideTypingInSub, 4500);
+      } else hideTypingInSub();
     }
     return;
   }
@@ -968,7 +1195,7 @@ async function onWS(d) {
     return;
   }
   if (d.event === 'deleted') {
-    // Telegram-style: fully remove the message row (smoothly, no jump)
+    // self_only — только у удалившего; без флага — у всех (delete for all)
     if (typeof removeMsgRow === 'function') removeMsgRow(d.id);
     else { const row = document.querySelector(`.mr[data-id="${d.id}"]`); if (row) row.remove(); }
     return;
@@ -1009,7 +1236,7 @@ async function onWS(d) {
         req(`/groups/${gid}/members`).then(members => {
           if (ACTIVE?.type === 'group' && ACTIVE.id === gid) {
             ACTIVE.members = members;
-            document.getElementById('ch-sub').textContent = `${members.length} ${plural(members.length, ['участник', 'участника', 'участников'])}`;
+            setChSub(`${members.length} ${plural(members.length, ['участник', 'участника', 'участников'])}`);
           }
         }).catch(() => {});
       }
@@ -1035,9 +1262,7 @@ async function onWS(d) {
     appendBub(document.getElementById('msgs'), d, fromMe, sndr, true);
     scrollMsgs();
     if (!fromMe) req(`/messages/${d.id}/read`, 'POST').catch(() => {});
-    if (document.getElementById('typing-ind').style.display !== 'none') {
-      document.getElementById('typing-ind').style.display = 'none';
-    }
+    hideTypingInSub();
   } else {
     if (!fromMe) {
       UNREAD[key] = (UNREAD[key] || 0) + 1;
@@ -1301,27 +1526,40 @@ function renderContacts() {
 }
 function emptyHtml(t) { return `<div style="padding:40px 20px;text-align:center;color:var(--t3);font-size:13.5px;line-height:1.6">${t}</div>`; }
 function searchHeader(t) { const d = document.createElement('div'); d.className = 'search-hdr'; d.textContent = t; return d; }
+function ensureAvEmojiEl(el) {
+  if (!el) return null;
+  let inner = el.querySelector('.av-emoji-inner');
+  if (!inner) {
+    inner = document.createElement('span');
+    inner.className = 'av-emoji-inner';
+    const overlay = el.querySelector('.av-preview-cam, .cg-av-cam');
+    if (overlay) el.insertBefore(inner, overlay);
+    else el.appendChild(inner);
+  }
+  return inner;
+}
 function applyAvatarEl(el, b64, emoji, color) {
   if (!el) return;
+  const inner = ensureAvEmojiEl(el);
   if (b64) {
     el.style.backgroundImage = `url('${b64}')`;
     el.style.backgroundSize = 'cover';
     el.style.backgroundPosition = 'center';
     el.style.backgroundColor = 'transparent';
-    el.textContent = '';
+    if (inner) { inner.textContent = ''; inner.style.display = 'none'; }
   } else {
     el.style.backgroundImage = '';
     el.style.backgroundSize = '';
     el.style.backgroundPosition = '';
     el.style.backgroundColor = color || '#2AABEE';
-    el.textContent = emoji || '😊';
+    if (inner) { inner.textContent = emoji || '😊'; inner.style.display = ''; }
   }
 }
 function avHtml(b64, emoji, color, sz, online = false) {
   const dot = online ? `<span class="av-dot"></span>` : '';
   const inner = b64
     ? `<div class="ci-av" style="background-image:url('${b64}')"></div>`
-    : `<div class="ci-av" style="background:${color};font-size:${Math.round(sz * .42)}px">${emoji}</div>`;
+    : `<div class="ci-av" style="background:${color};font-size:${Math.round(sz * .42)}px"><span class="av-emoji-inner">${emoji}</span></div>`;
   return `<div class="ci-av-wrap${online ? ' online' : ''}" style="width:${sz}px;height:${sz}px;min-width:${sz}px">${inner}${dot}</div>`;
 }
 function chatUnreadCount(key, serverCount = 0) {
@@ -1440,7 +1678,7 @@ async function onSearch(q) {
       if (seq !== _searchSeq || !SEARCH_Q) return;
       SEARCH_RES = res; renderContacts();
     } catch {}
-  }, 220);
+  }, 140);
 }
 function clearSearch() {
   _searchSeq++;                            // invalidate any in-flight request
@@ -1466,7 +1704,7 @@ async function openDM(c) {
   );
   if (sameOpen) {
     showDialog();
-    document.getElementById('typing-ind').style.display = 'none';
+    hideTypingInSub();
     return;
   }
   ACTIVE = { type: 'dm', id: c.id, name: isSaved ? 'Избранное' : c.display_name, user: c, saved: isSaved };
@@ -1483,7 +1721,7 @@ async function openDM(c) {
   }
   showDialog();
   restoreDraft();
-  document.getElementById('typing-ind').style.display = 'none';
+  hideTypingInSub();
   showMsgsLoading();
   const openSeq = ++OPEN_SEQ;
   const partnerId = isSaved ? myUserId() : c.id;
@@ -1526,7 +1764,7 @@ async function openGroup(g) {
   setHead(g.avatar_b64, g.avatar_emoji || '👥', '#2AABEE', g.name, `${members.length} участников`, true);
   showDialog();
   restoreDraft();
-  document.getElementById('typing-ind').style.display = 'none';
+  hideTypingInSub();
   showMsgsLoading();
   const openSeq = ++OPEN_SEQ;
   const gid = g.id;
@@ -1540,10 +1778,11 @@ async function openGroup(g) {
     if (ACTIVE?.type === 'group' && ACTIVE.id === gid) document.getElementById('msgs').innerHTML = `<div style="text-align:center;color:var(--t3);font-size:13px;margin-top:40px">Не удалось загрузить сообщения</div>`;
   }
 }
-function setHead(b64, emoji, color, name, sub) {
+function setHead(b64, emoji, color, name, sub, online = false) {
   applyAvatarEl(document.getElementById('ch-av'), b64, emoji, color);
   document.getElementById('ch-name').textContent = name;
-  document.getElementById('ch-sub').textContent = sub;
+  CH_SUB_TYPING = false;
+  setChSub(sub, online);
   twemojify(document.querySelector('.chat-head'));
 }
 function showDialog() {
@@ -1558,8 +1797,10 @@ function showDialog() {
   // init send/voice visibility based on current input
   onType();
   mi.focus();
+  startLastSeenTicker();
 }
 function closeDialog() {
+  stopLastSeenTicker();
   if (SELECT_MODE) exitSelect();
   if (STAGED.length) cancelStaged();
   if (EDITING) cancelEdit();
@@ -1577,6 +1818,15 @@ function viewActiveProfile() {
   if (ACTIVE.type === 'dm' && ACTIVE.saved) { showSavedInfo(); return; }
   if (ACTIVE.type === 'dm') showUserProfile(ACTIVE.id);
   else if (ACTIVE.type === 'group') showGroupInfo(ACTIVE.id);
+}
+function openChatMenu(e) {
+  if (!ACTIVE) return;
+  const items = [];
+  if (ACTIVE.type === 'dm' && ACTIVE.saved) items.push({ label: 'Избранное', fn: () => showSavedInfo() });
+  else if (ACTIVE.type === 'dm') items.push({ label: 'Профиль', fn: () => showUserProfile(ACTIVE.id) });
+  else if (ACTIVE.type === 'group') items.push({ label: 'Информация о группе', fn: () => showGroupInfo(ACTIVE.id) });
+  items.push({ label: 'Поиск', fn: () => openChatSearch() });
+  showCtxItems(e, items);
 }
 function showSavedInfo() {
   document.querySelectorAll('#saved-tabs .up-tab').forEach((t, i) => t.classList.toggle('act', i === 0));
@@ -1626,7 +1876,8 @@ function renderSharedTab(tc, items, tab) {
       const ico = { pdf:'📄', doc:'📝', docx:'📝', xls:'📊', xlsx:'📊', zip:'🗜️', rar:'🗜️', txt:'📃', ppt:'📈', pptx:'📈' }[ext] || '📎';
       const row = document.createElement('div'); row.className = 'up-file-row';
       row.innerHTML = `<span class="up-file-ico">${ico}</span><div class="up-file-info"><div class="up-file-name">${esc(m.file_name || 'Файл')}</div><div class="up-file-sub">${ext ? ext.toUpperCase() : ''}</div></div>`;
-      if (m.text && m.text.startsWith('data:')) row.onclick = () => openFile(m.text, m.file_name);
+      const src = normalizeFileSrc(m.text, m.file_name);
+      if (src) row.onclick = () => openFile(src, m.file_name);
       tc.appendChild(row);
     });
   } else if (tab === 'links') {
@@ -1679,8 +1930,7 @@ async function showGroupInfo(gid) {
     GINFO_MEMBERS = await req(`/groups/${GINFO_GID}/members`);
     GINFO_IS_ADMIN = !!(g?.is_admin || GINFO_MEMBERS.find(m => memberUserId(m) === ME.id)?.is_admin);
     const av = document.getElementById('ginfo-av');
-    if (g && g.avatar_b64) { av.style.backgroundImage = `url('${g.avatar_b64}')`; av.textContent = ''; av.style.background = ''; }
-    else { av.style.backgroundImage = ''; av.textContent = (g && g.avatar_emoji) || '👥'; av.style.background = '#2AABEE'; }
+    applyAvatarEl(av, g?.avatar_b64, (g && g.avatar_emoji) || '👥', '#2AABEE');
     document.getElementById('ginfo-name').textContent = (g && g.name) || (ACTIVE && ACTIVE.name) || 'Группа';
     document.getElementById('ginfo-sub').textContent = `${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`;
     document.getElementById('ginfo-add-btn').style.display = GINFO_IS_ADMIN ? '' : 'none';
@@ -1790,7 +2040,7 @@ async function submitAddGroupMembers() {
     GINFO_MEMBERS = await req(`/groups/${gid}/members`);
     if (ACTIVE?.type === 'group' && ACTIVE.id == gid) {
       ACTIVE.members = GINFO_MEMBERS;
-      document.getElementById('ch-sub').textContent = `${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`;
+      setChSub(`${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`);
     }
     document.getElementById('ginfo-sub').textContent = `${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`;
     loadGroupTab('members');
@@ -1818,7 +2068,7 @@ async function doKickMember(gid, uid) {
     GINFO_MEMBERS = GINFO_MEMBERS.filter(m => memberUserId(m) !== uid);
     if (ACTIVE?.type === 'group' && ACTIVE.id == gid) {
       ACTIVE.members = GINFO_MEMBERS;
-      document.getElementById('ch-sub').textContent = `${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`;
+      setChSub(`${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`);
     }
     document.getElementById('ginfo-sub').textContent = `${GINFO_MEMBERS.length} ${plural(GINFO_MEMBERS.length, ['участник', 'участника', 'участников'])}`;
     loadGroupTab('members');
@@ -1923,11 +2173,15 @@ async function showUserProfile(uid) {
     UP_UID = uid;
     const u = await req(`/users/${uid}`);
     const av = document.getElementById('up-av');
-    if (u.avatar_b64) { av.style.backgroundImage = `url('${u.avatar_b64}')`; av.textContent = ''; }
-    else { av.style.backgroundImage = ''; av.textContent = u.avatar_emoji; av.style.background = u.avatar_color; }
+    applyAvatarEl(av, u.avatar_b64, u.avatar_emoji, u.avatar_color);
     document.getElementById('up-name').textContent = u.display_name;
     document.getElementById('up-un').textContent = '@' + u.username;
     const rows = document.getElementById('up-rows'); rows.innerHTML = '';
+    if (uid !== ME.id && !u.hide_online) {
+      const st = u.online ? 'в сети' : (u.last_seen ? fmtLastSeen(u.last_seen) : 'давно не был(а) в сети');
+      rows.innerHTML = `<div class="up-row"><span class="up-k">Статус</span><span class="${u.online ? 'up-status-online' : ''}">${esc(st)}</span></div>`;
+      if (u.last_seen && !u.online) lastSeenMap[uid] = u.last_seen;
+    }
     if (u.phone) rows.innerHTML += `<div class="up-row"><span class="up-k">Телефон</span><span>${esc(u.phone)}</span></div>`;
     if (u.birth_date) rows.innerHTML += `<div class="up-row"><span class="up-k">День рождения</span><span>${esc(u.birth_date)}</span></div>`;
     const writeBtn = document.getElementById('up-write');
@@ -1992,7 +2246,8 @@ async function loadUpTab(tab) {
         const ico = { pdf:'📄', doc:'📝', docx:'📝', xls:'📊', xlsx:'📊', zip:'🗜️', rar:'🗜️', txt:'📃', ppt:'📈', pptx:'📈' }[ext] || '📎';
         const row = document.createElement('div'); row.className = 'up-file-row';
         row.innerHTML = `<span class="up-file-ico">${ico}</span><div class="up-file-info"><div class="up-file-name">${esc(m.file_name || 'Файл')}</div><div class="up-file-sub">${ext ? ext.toUpperCase() : ''}</div></div>`;
-        if (m.text && m.text.startsWith('data:')) row.onclick = () => openFile(m.text, m.file_name);
+        const src = normalizeFileSrc(m.text, m.file_name);
+      if (src) row.onclick = () => openFile(src, m.file_name);
         tc.appendChild(row);
       });
     } else if (tab === 'voice') {
@@ -2061,18 +2316,43 @@ function renderMsgs(msgs, type, members = []) {
   scrollMsgs();
 }
 function tickHtml(m) {
+  const mine = m.sender_id === ME.id;
   let cls = 'tick';
   if (m.is_read) cls = 'tick read';
   else if (m.is_delivered) cls = 'tick delivered';
   const dbl = m.is_delivered || m.is_read;
   const one = `<span class="${cls}">✓</span>`;
   const two = `${one}<span class="${cls}">✓</span>`;
-  return `<span class="ticks" data-id="${m.id}">${dbl ? two : one}</span>`;
+  const click = mine ? ` class="ticks ticks-click" onclick="showReadInfo(event,${m.id})" title="Кто просмотрел"` : ` class="ticks"`;
+  return `<span${click} data-id="${m.id}">${dbl ? two : one}</span>`;
+}
+async function showReadInfo(e, msgId) {
+  e.stopPropagation();
+  e.preventDefault();
+  try {
+    const info = await req(`/messages/${msgId}/read-info`);
+    const list = document.getElementById('readinfo-list');
+    const title = document.getElementById('readinfo-title');
+    if (!list) return;
+    if (info.readers && info.readers.length) {
+      title.textContent = info.readers.length === 1 ? 'Просмотрено' : 'Просмотрели';
+      list.innerHTML = info.readers.map(r =>
+        `<div class="readinfo-row"><div class="readinfo-name">${esc(r.display_name)}</div><div class="readinfo-time">${fmtReadAt(r.read_at)}</div></div>`
+      ).join('');
+    } else if (info.is_delivered) {
+      title.textContent = 'Доставлено';
+      list.innerHTML = '<div class="readinfo-empty">Сообщение доставлено, но ещё не просмотрено</div>';
+    } else {
+      title.textContent = 'Статус';
+      list.innerHTML = '<div class="readinfo-empty">Сообщение ещё не доставлено</div>';
+    }
+    om('m-readinfo');
+  } catch (err) { toast(err.message || 'Не удалось загрузить', 'e'); }
 }
 function buildInlineMeta(m, mine) {
   const t = new Date(m.timestamp || Date.now());
   let html = `<span class="bmi-time">${fmtTime(t)}</span>`;
-  if (m.edited) html += `<span class="bmi-ed"> ред.</span>`;
+  if (m.edited) html += `<span class="bmi-ed"> изменено</span>`;
   if (mine) html += tickHtml(m);
   return html;
 }
@@ -2133,8 +2413,7 @@ function appendBub(area, m, mine, sender = null, animate = true) {
     row.dataset.ts = String(new Date(m.timestamp).getTime());
     if (isHead) {
       const av = document.createElement('div'); av.className = 'mr-av';
-      if (sender.avatar_b64) av.style.backgroundImage = `url('${sender.avatar_b64}')`;
-      else { av.style.background = sender.avatar_color || '#2AABEE'; av.textContent = sender.avatar_emoji || '😊'; }
+      applyAvatarEl(av, sender.avatar_b64, sender.avatar_emoji || '😊', sender.avatar_color || '#2AABEE');
       row.appendChild(av);
     } else {
       const sp = document.createElement('div');
@@ -2145,7 +2424,13 @@ function appendBub(area, m, mine, sender = null, animate = true) {
   }
 
   const bw = document.createElement('div'); bw.className = 'bw' + (isGroupIn ? ' bw-g' : '');
-  if (isHead) { const sn = document.createElement('div'); sn.className = 'bw-sn'; sn.textContent = sender.display_name; bw.appendChild(sn); }
+  if (isHead) {
+    const sn = document.createElement('div');
+    sn.className = 'bw-sn';
+    sn.textContent = sender.display_name;
+    sn.style.color = senderNameColor(m.sender_id);
+    bw.appendChild(sn);
+  }
 
   const bub = document.createElement('div');
   bub.dataset.id = m.id;
@@ -2156,44 +2441,58 @@ function appendBub(area, m, mine, sender = null, animate = true) {
   if (!animate) bub.style.animation = 'none';
   let inlineMeta = false;
 
+  if (m.forward_from_name) {
+    bub.appendChild(buildForwardFrom(m.forward_from_name, m.forward_from_id));
+  }
+
   // reply
   if (m.reply_to_id && m.reply_preview) {
-    bub.appendChild(buildReplyQuote(m.reply_to_id, m.reply_preview));
+    bub.appendChild(buildReplyQuote(m.reply_to_id, m.reply_preview, m.reply_from_name, m.reply_from_id));
   }
 
   if (m.msg_type === 'voice') {
     bub.appendChild(buildVoicePlayer(text));
   } else if (m.msg_type === 'image' && (text.startsWith('data:') || text.startsWith('blob:'))) {
     const img = document.createElement('img');
-    img.src = text; img.className = 'img-bub'; img.loading = 'lazy';
+    img.src = text; img.className = 'img-bub'; img.loading = 'eager';
     img.alt = m.file_name || 'Изображение';
     img.onclick = e => { e.stopPropagation(); if (SELECT_MODE) { toggleSelect(m); return; } openLightbox(text, m.file_name); };
-    img.onerror = () => {
-      // graceful fallback: show an openable file card instead of dead text
-      const fb = document.createElement('div'); fb.className = 'fb'; fb.style.cursor = 'pointer';
-      fb.innerHTML = `<span class="fb-ic">🖼️</span><div class="fb-meta"><div class="fn">${esc(m.file_name || 'Изображение')}</div><div class="fsz">нажмите, чтобы открыть</div></div>`;
-      fb.onclick = e => { e.stopPropagation(); openFile(text, m.file_name || 'image.jpg'); };
-      img.replaceWith(fb);
-    };
     bub.appendChild(img);
     inlineMeta = appendMediaCaption(bub, m, mine);
-  } else if ((m.msg_type === 'file' || m.msg_type === 'image') && (m.file_name || text.startsWith('data:') || text.startsWith('blob:'))) {
+  } else if (m.msg_type === 'file' && (m.file_name || text)) {
     const fname = m.file_name || 'Файл';
     const ext = (fname.split('.').pop() || '').toLowerCase();
+    const src = normalizeFileSrc(text, fname);
     const ico = { pdf: '📄', doc: '📝', docx: '📝', xls: '📊', xlsx: '📊', jpg: '🖼️', jpeg: '🖼️', png: '🖼️', gif: '🖼️', webp: '🖼️', mp4: '🎬', mp3: '🎵', zip: '🗜️', rar: '🗜️', txt: '📃', ppt: '📈', pptx: '📈' }[ext] || '📎';
     const f = document.createElement('div'); f.className = 'fb';
-    f.innerHTML = `<span class="fb-ic">${ico}</span><div class="fb-meta"><div class="fn">${esc(fname)}</div><div class="fsz">${ext ? ext.toUpperCase() + ' · ' : ''}нажмите, чтобы открыть</div></div>`;
-    if (text.startsWith('data:') || text.startsWith('blob:')) {
+    const action = src ? (isBrowserViewable(fname, '') ? 'открыть' : 'скачать') : 'недоступен';
+    f.innerHTML = `<span class="fb-ic">${ico}</span><div class="fb-meta"><div class="fn">${esc(fname)}</div><div class="fsz">${ext ? ext.toUpperCase() + ' · ' : ''}${action}</div></div>`;
+    if (src) {
       f.style.cursor = 'pointer';
-      f.onclick = e => { e.stopPropagation(); openFile(text, fname); };
+      f.onclick = e => { e.stopPropagation(); if (SELECT_MODE) { toggleSelect(m); return; } openFile(src, fname); };
+      f.oncontextmenu = e => { e.preventDefault(); e.stopPropagation(); downloadFile(src, fname); };
     }
     bub.appendChild(f);
     if (!inlineMeta) inlineMeta = appendMediaCaption(bub, m, mine);
-  } else {
+  } else if (isE) {
     const span = document.createElement('span');
+    span.className = 'bub-txt';
+    span.textContent = text;
+    bub.appendChild(span);
+  } else {
+    const wrap = document.createElement('div');
+    wrap.className = 'bub-text-wrap';
+    const span = document.createElement('span');
+    span.className = 'bub-txt';
     if (!isE && hasMd(text)) span.innerHTML = renderMd(text);
     else span.textContent = text;
-    bub.appendChild(span);
+    wrap.appendChild(span);
+    const meta = document.createElement('div');
+    meta.className = 'bub-meta-in';
+    meta.innerHTML = buildInlineMeta(m, mine);
+    wrap.appendChild(meta);
+    bub.appendChild(wrap);
+    inlineMeta = true;
   }
 
   // reactions
@@ -2225,7 +2524,7 @@ function appendBub(area, m, mine, sender = null, animate = true) {
     bm.className = 'bm' + (mine ? ' out' : '');
     const t = new Date(m.timestamp);
     let meta = `<span>${fmtTime(t)}</span>`;
-    if (m.edited) meta += `<span style="font-style:italic;opacity:.7"> ред.</span>`;
+    if (m.edited) meta += `<span style="font-style:italic;opacity:.7"> изменено</span>`;
     if (mine) meta += tickHtml(m);
     bm.innerHTML = meta;
     bw.appendChild(bm);
@@ -2270,49 +2569,13 @@ function buildWaveSVG() {
   }
   return svg;
 }
-function downloadData(dataUrl, fname) {
-  try {
-    // data: URLs over a few MB silently fail with a.download in Chrome —
-    // convert to a Blob URL which always downloads reliably
-    if (typeof dataUrl === 'string' && dataUrl.startsWith('data:')) {
-      const blob = dataURLtoBlob(dataUrl);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = fname || 'file';
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-      return;
-    }
-    const a = document.createElement('a');
-    a.href = dataUrl; a.download = fname || 'file';
-    document.body.appendChild(a); a.click(); a.remove();
-  } catch (e) { toast('Не удалось скачать', 'e'); }
-}
-function openFile(dataUrl, fname) {
-  try {
-    const blob = dataURLtoBlob(dataUrl);
-    const url = URL.createObjectURL(blob);
-    const w = window.open(url, '_blank');
-    // if popup blocked or unviewable type, fall back to download
-    if (!w) downloadData(dataUrl, fname);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  } catch { downloadData(dataUrl, fname); }
-}
-function dataURLtoBlob(dataUrl) {
-  const [head, b64] = dataUrl.split(',');
-  const mime = (head.match(/data:([^;]+)/) || [, 'application/octet-stream'])[1];
-  const bin = atob(b64);
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  return new Blob([arr], { type: mime });
-}
 let _lbSrc = '', _lbName = '';
 function openLightbox(src, fname) { _lbSrc = src; _lbName = fname || ('photo_' + Date.now() + '.jpg'); document.getElementById('lb-img').src = src; document.getElementById('lightbox').style.display = 'flex'; }
 function closeLightbox() { document.getElementById('lightbox').style.display = 'none'; }
 function downloadLightbox() { if (_lbSrc) downloadData(_lbSrc, _lbName); }
 function scrollToMsg(id) {
   const r = document.querySelector(`.mr[data-id="${id}"]`);
-  if (r) { r.scrollIntoView({ behavior: 'smooth', block: 'center' }); r.style.outline = '2px solid var(--acc)'; setTimeout(() => r.style.outline = '', 900); }
+  if (r) { r.scrollIntoView({ behavior: 'smooth', block: 'center' }); r.style.outline = '2px solid var(--acc)'; setTimeout(() => r.style.outline = '', 450); }
 }
 function scrollMsgs() {
   const a = document.getElementById('msgs');
@@ -2375,12 +2638,11 @@ async function send(text, type, fname) {
   const fake = {
     id: 'tmp', temp_id: tmp, sender_id: myUserId(), text, msg_type: type, file_name: fname,
     timestamp: new Date().toISOString(), is_read: false, is_delivered: false,
-    edited: false, reactions: {}, reply_to_id: REPLY?.id, reply_preview: REPLY?.text?.slice(0, 60)
+    edited: false, reactions: {}, ...replyPayloadExtra()
   };
   appendBub(document.getElementById('msgs'), fake, true, null, true);
   scrollMsgs();
-  const payload = { text, msg_type: type, file_name: fname, temp_id: tmp };
-  if (REPLY) { payload.reply_to_id = REPLY.id; payload.reply_preview = REPLY.text?.slice(0, 60); }
+  const payload = { text, msg_type: type, file_name: fname, temp_id: tmp, ...replyPayloadExtra() };
   if (ACTIVE.type === 'dm') payload.recipient_id = activeDmPartnerId();
   else payload.group_id = ACTIVE.id;
   try {
@@ -2507,7 +2769,12 @@ async function sendStaged() {
   if (!STAGED.length || !ACTIVE) return;
   const mi = document.getElementById('msg-inp');
   const caption = mi.value.trim();
-  const items = STAGED.slice();
+  const items = STAGED.map(st => ({
+    file: st.file,
+    msg_type: st.msg_type,
+    file_name: st.file_name,
+    previewUrl: URL.createObjectURL(st.file),
+  }));
   cancelStaged();
   mi.value = '';
   autoGrow(mi);
@@ -2518,15 +2785,24 @@ async function sendStaged() {
     const st = items[i];
     const cap = i === 0 ? caption : '';
     const tmp = 't' + Date.now() + Math.random().toString(36).slice(2, 6);
-    const preview = st._objurl || URL.createObjectURL(st.file);
-    appendBub(document.getElementById('msgs'), {
-      id: 'tmp', temp_id: tmp, sender_id: ME.id, text: preview,
+    let previewText = st.previewUrl;
+    if (st.msg_type === 'image') {
+      try { previewText = await fileToDataUrl(st.file); } catch {}
+    }
+    if (st.previewUrl && previewText !== st.previewUrl) {
+      try { URL.revokeObjectURL(st.previewUrl); } catch {}
+    }
+    const fake = {
+      id: 'tmp', temp_id: tmp, sender_id: ME.id, text: previewText,
       msg_type: st.msg_type, file_name: st.file_name, caption: cap || null,
       timestamp: new Date().toISOString(), is_read: false, is_delivered: false,
       edited: false, reactions: {},
       reply_to_id: i === 0 ? REPLY?.id : null,
-      reply_preview: i === 0 ? REPLY?.text?.slice(0, 60) : null
-    }, true, null, true);
+      reply_preview: i === 0 ? REPLY?.text?.slice(0, 200) : null,
+      reply_from_name: i === 0 ? REPLY?.author : null,
+      reply_from_id: i === 0 ? REPLY?.author_id : null,
+    };
+    appendBub(document.getElementById('msgs'), fake, true, null, true);
     scrollMsgs();
     lastPreview = cap || (st.msg_type === 'image' ? '🖼️ Изображение' : '📎 ' + st.file_name);
     try {
@@ -2535,11 +2811,14 @@ async function sendStaged() {
       const r = await fetch(`${API}/upload`, { method: 'POST', headers: { Authorization: `Bearer ${ME.token}` }, body: fd });
       if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || 'Ошибка загрузки');
       const d = await r.json();
+      patchTempBubbleImage(tmp, d.data_b64, { ...fake, msg_type: d.msg_type, text: d.data_b64, file_name: d.file_name });
       const payload = { text: d.data_b64, msg_type: d.msg_type, file_name: d.file_name, temp_id: tmp };
       if (cap) payload.caption = cap;
       if (i === 0 && REPLY) {
         payload.reply_to_id = REPLY.id;
-        payload.reply_preview = REPLY.text?.slice(0, 60);
+        payload.reply_preview = REPLY.text?.slice(0, 200);
+        payload.reply_from_name = REPLY.author;
+        payload.reply_from_id = REPLY.author_id;
       }
       if (ACTIVE.type === 'dm') payload.recipient_id = activeDmPartnerId();
       else payload.group_id = ACTIVE.id;
@@ -2548,6 +2827,7 @@ async function sendStaged() {
       toast(e.message, 'e');
       const row = document.querySelector(`.mr[data-tmp="${tmp}"]`);
       if (row) row.remove();
+      if (st.previewUrl) { try { URL.revokeObjectURL(st.previewUrl); } catch {} }
     }
   }
   if (lastPreview) {
@@ -2638,39 +2918,56 @@ function endVoiceUI() {
   onType();
 }
 
-/* ═══ EMOJI RENDER ═══
-   System emoji are used (each OS renders its own style). Apple's emoji font is
-   proprietary and can't be legally embedded; external CDN attempts (twemoji /
-   AppleColorEmoji woff) returned 404/403 and blocked rendering, so they're removed.
-   This stays a no-op so all existing call sites keep working; to enable image
-   emoji later, self-host a set and parse `el` here. */
-function twemojify(el) { /* no-op: native system emoji */ }
+/* ═══ EMOJI RENDER — native system emoji (как в Telegram) ═══ */
+function twemojify(el) { /* каждая ОС рисует свои эмодзи */ }
 
 
 /* ═══ EMOJI PICKER ═══ */
 function buildEP() {
-  const cats = document.getElementById('ep-cats'), grid = document.getElementById('ep-grid');
+  const cats = document.getElementById('ep-cats');
   cats.innerHTML = '';
   EPC.forEach((c, i) => {
-    const b = document.createElement('div'); b.className = 'epc' + (i === 0 ? ' act' : ''); b.textContent = c.i;
-    b.addEventListener('click', e => { e.stopPropagation(); cats.querySelectorAll('.epc').forEach(x => x.classList.remove('act')); b.classList.add('act'); fillEP(c.e); });
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'epc' + (i === 0 ? ' act' : '');
+    b.textContent = c.i;
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      cats.querySelectorAll('.epc').forEach(x => x.classList.remove('act'));
+      b.classList.add('act');
+      fillEP(c.e);
+    });
     cats.appendChild(b);
   });
   fillEP(EPC[0].e);
-  twemojify(cats);
 }
+
 function fillEP(arr) {
-  const g = document.getElementById('ep-grid'); g.innerHTML = '';
-  arr.forEach(e => { const b = document.createElement('div'); b.className = 'epb'; b.textContent = e; b.addEventListener('click', ev => { ev.stopPropagation(); insertEmoji(e); }); g.appendChild(b); });
-  twemojify(g);
+  const g = document.getElementById('ep-grid');
+  g.innerHTML = '';
+  g.scrollTop = 0;
+  const frag = document.createDocumentFragment();
+  arr.forEach(e => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'epb';
+    b.title = e;
+    b.textContent = e;
+    b.addEventListener('click', ev => { ev.stopPropagation(); insertEmoji(e); });
+    frag.appendChild(b);
+  });
+  g.appendChild(frag);
 }
 function toggleEP() {
-  const ep = document.getElementById('ep');
-  const show = ep.style.display === 'none' || !ep.style.display;
-  ep.style.display = show ? 'flex' : 'none';
+  const dlg = document.getElementById('dialog');
+  const show = !dlg.classList.contains('ep-open');
+  dlg.classList.toggle('ep-open', show);
   document.getElementById('emoji-btn').classList.toggle('act', show);
 }
-function hideEP() { document.getElementById('ep').style.display = 'none'; document.getElementById('emoji-btn')?.classList.remove('act'); }
+function hideEP() {
+  document.getElementById('dialog')?.classList.remove('ep-open');
+  document.getElementById('emoji-btn')?.classList.remove('act');
+}
 function insertEmoji(e) {
   const mi = document.getElementById('msg-inp');
   const p = mi.selectionStart || mi.value.length;
@@ -2759,13 +3056,20 @@ function setReplyBarThumb(m, src) {
     el.style.display = 'none';
   }
 }
-function buildReplyQuote(replyToId, preview) {
+function buildReplyQuote(replyToId, preview, authorName, authorId) {
   const rq = document.createElement('div');
   rq.className = 'rq';
+  const bar = document.createElement('div');
+  bar.className = 'rq-bar';
+  const body = document.createElement('div');
+  body.className = 'rq-body';
   const name = document.createElement('div');
   name.className = 'rq-name';
-  name.textContent = '↩ Ответ';
-  rq.appendChild(name);
+  name.textContent = authorName || 'Сообщение';
+  const c = senderNameColor(authorId);
+  name.style.color = c;
+  bar.style.background = c;
+  body.appendChild(name);
   const pv = preview || '';
   const label = humanizeReplyPreview(pv);
   if (isFullImagePreview(pv)) {
@@ -2779,18 +3083,33 @@ function buildReplyQuote(replyToId, preview) {
       const tx = document.createElement('div');
       tx.className = 'rq-text';
       tx.textContent = REPLY_MEDIA.photo;
-      rq.appendChild(tx);
+      body.appendChild(tx);
     };
     wrap.appendChild(img);
-    rq.appendChild(wrap);
+    body.appendChild(wrap);
   } else {
     const tx = document.createElement('div');
     tx.className = 'rq-text';
     tx.textContent = label;
-    rq.appendChild(tx);
+    body.appendChild(tx);
   }
+  rq.appendChild(bar);
+  rq.appendChild(body);
   rq.onclick = e => { e.stopPropagation(); scrollToMsg(replyToId); };
   return rq;
+}
+function replyAuthorLabel(m) {
+  if (m.sender_id === ME.id) return ME.display_name || ME.username || 'Вы';
+  return senderDisplayName(m.sender_id);
+}
+function replyPayloadExtra() {
+  if (!REPLY) return {};
+  return {
+    reply_to_id: REPLY.id,
+    reply_preview: (REPLY.text || '').slice(0, 200),
+    reply_from_name: REPLY.author,
+    reply_from_id: REPLY.author_id,
+  };
 }
 function replyAuthorName(m) {
   if (!ACTIVE) return 'Ответ';
@@ -2806,7 +3125,7 @@ function setReply(m) {
   if (REPLY) cancelReply();
   const preview = replyPreviewText(m);
   const thumb = replyImageSrc(m);
-  REPLY = { id: m.id, text: preview };
+  REPLY = { id: m.id, text: preview, author: replyAuthorLabel(m), author_id: m.sender_id };
   document.getElementById('rb-name').textContent = replyAuthorName(m);
   document.getElementById('rb-text').textContent = preview;
   setReplyBarThumb(m, thumb);
@@ -2870,6 +3189,10 @@ function msgCtx(e, m, mine) {
     { label: 'Скопировать', fn: () => copyMsg(m) },
     { label: 'В Избранное', fn: () => forwardToSaved(m) },
   ];
+  if (m.msg_type === 'file' || m.msg_type === 'image') {
+    const dlName = m.file_name || (m.msg_type === 'image' ? 'image.jpg' : 'file');
+    items.splice(5, 0, { label: 'Скачать', fn: () => downloadFile(m.text, dlName) });
+  }
   if (mine) {
     if (m.msg_type === 'text' && !m.deleted) items.push({ label: 'Редактировать', fn: () => editMsg(m) });
     items.push({ label: 'Удалить', cls: 'ctx-del', fn: () => delMsg(m, 'sender') });
@@ -2914,12 +3237,12 @@ async function loadPinnedBar() {
   const t = ACTIVE.type === 'group' ? 'g' : 'd';
   try {
     const pins = await req(`/pinned/${t}/${ACTIVE.id}`);
-    const bar = document.getElementById('pinbar'), btn = document.getElementById('pinned-btn');
+    const bar = document.getElementById('pinbar');
     if (pins.length) {
       const last = pins[pins.length - 1];
       bar.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg> <b>Закреплено:</b> ${esc((last.text || '').slice(0, 60))}`;
-      bar.style.display = 'flex'; bar.onclick = () => scrollToMsg(last.id); btn.style.display = 'flex';
-    } else { bar.style.display = 'none'; btn.style.display = 'none'; }
+      bar.style.display = 'flex'; bar.onclick = () => scrollToMsg(last.id);
+    } else bar.style.display = 'none';
   } catch {}
 }
 function showPinned() { loadPinnedBar(); }
@@ -2950,12 +3273,19 @@ async function copyMsg(m) {
 }
 async function forwardToSaved(m) {
   if (!ME) return toast('Нет соединения', 'e');
+  const fwd = forwardPayloadFrom(m);
   const payload = {
     text: m.text, msg_type: m.msg_type || 'text', file_name: m.file_name || null,
-    recipient_id: myUserId(), temp_id: 't' + Date.now()
+    recipient_id: myUserId(), temp_id: 't' + Date.now(), ...fwd
   };
+  if (m.caption) payload.caption = m.caption;
   if (ACTIVE && isActiveSaved()) {
-    const fake = { id: 'tmp', temp_id: payload.temp_id, sender_id: myUserId(), text: m.text, msg_type: payload.msg_type, file_name: payload.file_name, timestamp: new Date().toISOString(), is_read: true, reactions: {} };
+    const fake = {
+      id: 'tmp', temp_id: payload.temp_id, sender_id: myUserId(), text: m.text,
+      msg_type: payload.msg_type, file_name: payload.file_name, timestamp: new Date().toISOString(),
+      is_read: true, reactions: {}, ...fwd
+    };
+    if (m.caption) fake.caption = m.caption;
     appendBub(document.getElementById('msgs'), fake, true, null, true); scrollMsgs();
   }
   try {
@@ -3050,6 +3380,57 @@ function selectCopy() {
 
 
 let FWD_MSGS = [];          // messages queued for forwarding
+
+function senderDisplayName(userId) {
+  if (!userId) return 'Пользователь';
+  if (ME && userId === ME.id) return ME.display_name || ME.username || 'Вы';
+  const dm = findDmChat(userId);
+  if (dm?.display_name) return dm.display_name;
+  if (ACTIVE?.type === 'group' && ACTIVE.members) {
+    const mem = ACTIVE.members.find(x => x.id === userId);
+    if (mem?.display_name) return mem.display_name;
+  }
+  const c = CHATS.find(x => x.id === userId && !x.is_saved);
+  if (c?.display_name) return c.display_name;
+  return 'Пользователь';
+}
+
+function forwardPayloadFrom(m) {
+  const id = m.forward_from_id || m.sender_id;
+  const name = (m.forward_from_name || '').trim() || senderDisplayName(id);
+  return { forward_from_id: id, forward_from_name: name.slice(0, 128) };
+}
+
+const SN_COLORS = ['#CC801F', '#3390EC', '#8471D5', '#4FAE4E', '#E17076', '#299AD6', '#57A3BC', '#C36479'];
+function senderNameColor(userId) {
+  if (!userId) return 'var(--acc)';
+  return SN_COLORS[Math.abs(Number(userId)) % SN_COLORS.length];
+}
+
+function buildForwardFrom(name, authorId) {
+  const el = document.createElement('div');
+  el.className = 'fwd-from';
+  const bar = document.createElement('div');
+  bar.className = 'fwd-from-bar';
+  const body = document.createElement('div');
+  body.className = 'fwd-from-body';
+  const label = document.createElement('div');
+  label.className = 'fwd-from-label';
+  label.textContent = 'Переслано от';
+  const nm = document.createElement('div');
+  nm.className = 'fwd-from-name';
+  nm.textContent = name;
+  const c = senderNameColor(authorId);
+  label.style.color = c;
+  nm.style.color = c;
+  bar.style.background = c;
+  body.appendChild(label);
+  body.appendChild(nm);
+  el.appendChild(bar);
+  el.appendChild(body);
+  return el;
+}
+
 function openForward(msgs) {
   FWD_MSGS = Array.isArray(msgs) ? msgs : [msgs];
   if (!FWD_MSGS.length) return;
@@ -3059,7 +3440,7 @@ function openForward(msgs) {
   document.getElementById('fwd-search').value = '';
   renderFwdList('');
   modal.style.display = 'flex';
-  setTimeout(() => document.getElementById('fwd-search').focus(), 60);
+  setTimeout(() => document.getElementById('fwd-search').focus(), 20);
 }
 function closeForward() {
   document.getElementById('fwd-modal').style.display = 'none';
@@ -3095,10 +3476,12 @@ async function doForward(target) {
   if (!ME) return toast('Нет соединения', 'e');
   const n = FWD_MSGS.length;
   for (const m of FWD_MSGS) {
+    const fwd = forwardPayloadFrom(m);
     const payload = {
       text: m.text, msg_type: m.msg_type || 'text', file_name: m.file_name || null,
-      temp_id: 't' + Date.now() + Math.random().toString(36).slice(2, 5)
+      temp_id: 't' + Date.now() + Math.random().toString(36).slice(2, 5), ...fwd
     };
+    if (m.caption) payload.caption = m.caption;
     if (target.kind === 'group') payload.group_id = target.id;
     else payload.recipient_id = target.kind === 'saved' ? myUserId() : target.id;
     try { await dispatchMsg(payload); }
@@ -3130,7 +3513,7 @@ function applyEdit(id, newText) {
     const bm = row.querySelector('.bm');
     if (bm && !bm.querySelector('.edited-mark')) {
       const em = document.createElement('span'); em.className = 'edited-mark';
-      em.style.cssText = 'font-style:italic;opacity:.7;margin-left:3px'; em.textContent = ' ред.';
+      em.style.cssText = 'font-style:italic;opacity:.7;margin-left:3px'; em.textContent = ' изменено';
       const ticks = bm.querySelector('.ticks');
       if (ticks) bm.insertBefore(em, ticks); else bm.appendChild(em);
     }
@@ -3212,11 +3595,11 @@ function removeMsgRow(id) {
   if (!row) return;
   // collapse smoothly so neighbours don't "jump"
   const h = row.offsetHeight;
-  row.style.cssText += `;height:${h}px;overflow:hidden;transition:height .18s ease,opacity .18s ease,margin .18s ease;`;
+  row.style.cssText += `;height:${h}px;overflow:hidden;transition:height .1s ease,opacity .1s ease,margin .1s ease;`;
   // force reflow then collapse
   void row.offsetHeight;
   row.style.height = '0px'; row.style.opacity = '0'; row.style.marginBottom = '0px';
-  setTimeout(() => row.remove(), 190);
+  setTimeout(() => row.remove(), 110);
 }
 async function doDel(id, forAll) {
   cm('m-confirm');
@@ -3464,7 +3847,7 @@ function setFont(v) {
   if (ME) { ME.ui_scale = String(v); saveSession(); req('/me','PATCH',{ui_scale:String(v)}).catch(()=>{}); }
 }
 function loadFont() {
-  const v = parseInt(lsGet('fs') || '14');
+  const v = parseInt(lsGet('fs') || '16');
   FS = v;
   document.documentElement.style.setProperty('--fs', v + 'px');
   document.body.style.fontSize = v + 'px';
@@ -3548,6 +3931,7 @@ async function openCreateGroup() {
   document.getElementById('g-name').value = '';
   document.getElementById('g-chips').innerHTML = '';
   document.getElementById('cg-av-emoji').textContent = '👥';
+  document.getElementById('cg-av-emoji').style.display = '';
   document.getElementById('cg-av').style.backgroundImage = '';
   const er = document.getElementById('g-emoji-row'); er.innerHTML = '';
   GP_E.forEach(e => {
@@ -3677,10 +4061,12 @@ function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&
 function lsSet(k, v) { try { localStorage.setItem('ap_' + k, v); } catch {} }
 function lsGet(k) { try { return localStorage.getItem('ap_' + k); } catch { return null; } }
 function btnLoad(id, on) {
-  const b = document.getElementById(id); if (!b) return; b.disabled = on;
+  const b = document.getElementById(id); if (!b) return;
+  b.disabled = on;
+  b.classList.toggle('is-loading', on);
   const sp = b.querySelector('.spin'), lb = b.querySelector('span');
   if (sp) sp.style.display = on ? 'block' : 'none';
-  if (lb) lb.style.opacity = on ? 0 : 1;
+  if (lb) lb.style.display = on ? 'none' : '';
 }
 function toast(m, t = 'i') {
   const map = { e: 'te', ok: 'tok', i: 'ti' };

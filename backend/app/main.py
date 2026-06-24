@@ -11,7 +11,7 @@ from pydantic import BaseModel
 import pathlib, re
 
 from .database import engine, Base, get_db, SessionLocal
-from .models import User, Message, Group, GroupMember
+from .models import User, Message, Group, GroupMember, MessageRead
 from .auth import hash_password, verify_password, create_access_token, verify_token
 from .crypto_srv import enc, dec
 from .websocket_mgr import manager
@@ -30,14 +30,18 @@ def _auto_migrate():
             "avatar_emoji":"VARCHAR(16)","avatar_color":"VARCHAR(16)","avatar_b64":"TEXT",
             "theme":"VARCHAR(16)","ui_scale":"VARCHAR(16)","pinned_chats":"VARCHAR(512)",
             "folders":"TEXT","hide_online":"BOOLEAN DEFAULT 0","hide_phone":"BOOLEAN DEFAULT 0",
-            "favorites":"TEXT DEFAULT '[]'","sessions":"TEXT DEFAULT '[]'"
+            "favorites":"TEXT DEFAULT '[]'","sessions":"TEXT DEFAULT '[]'",
+            "last_seen":"DATETIME"
         },
         "messages": {
             "group_id":"INTEGER","msg_type":"VARCHAR(16) DEFAULT 'text'",
             "file_name":"VARCHAR(256)","enc_text":"TEXT","reply_to_id":"INTEGER",
             "reply_preview":"VARCHAR(256)","reactions":"TEXT","pinned":"BOOLEAN DEFAULT 0",
-            "is_read":"BOOLEAN DEFAULT 0","is_delivered":"BOOLEAN DEFAULT 0",
-            "edited":"BOOLEAN DEFAULT 0","deleted_for_all":"BOOLEAN DEFAULT 0"
+            "reply_from_id":"INTEGER","reply_from_name":"VARCHAR(128)",
+            "forward_from_id":"INTEGER","forward_from_name":"VARCHAR(128)",
+            "is_read":"BOOLEAN DEFAULT 0","read_at":"DATETIME","is_delivered":"BOOLEAN DEFAULT 0",
+            "edited":"BOOLEAN DEFAULT 0","deleted_for_all":"BOOLEAN DEFAULT 0",
+            "hidden_for":"TEXT DEFAULT '[]'"
         },
         "groups": {"avatar_b64":"TEXT"},
     }
@@ -102,6 +106,38 @@ def iso_utc(ts: dt.datetime) -> str:
     if ts.tzinfo is None: ts = ts.replace(tzinfo=dt.timezone.utc)
     return ts.isoformat()
 
+def _now_utc() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+def _presence_info(u: User, viewer_id: int = None) -> dict:
+    online = manager.is_online(u.id)
+    if u.hide_online and viewer_id != u.id:
+        return {"online": False, "last_seen": None}
+    if online:
+        return {"online": True, "last_seen": None}
+    return {"online": False, "last_seen": iso_utc(u.last_seen) if u.last_seen else None}
+
+def _record_group_reads(uid: int, msgs: list, db: Session):
+    now = _now_utc()
+    for msg in msgs:
+        if msg.sender_id == uid:
+            continue
+        if db.query(MessageRead).filter_by(message_id=msg.id, user_id=uid).first():
+            continue
+        db.add(MessageRead(message_id=msg.id, user_id=uid, read_at=now))
+        msg.is_read = True
+
+def _mark_dm_reads(uid: int, sender_id: int, up_to_id: int, db: Session) -> list:
+    now = _now_utc()
+    msgs = db.query(Message).filter(
+        Message.recipient_id == uid, Message.sender_id == sender_id,
+        Message.group_id == None, Message.is_read == False, Message.id <= up_to_id
+    ).all()
+    for msg in msgs:
+        msg.is_read = True
+        msg.read_at = now
+    return msgs
+
 # ── schemas ───────────────────────────────────────────────────
 class PhoneCheck(BaseModel): phone: str
 class RegisterIn(BaseModel):
@@ -141,15 +177,22 @@ class SendMsgIn(BaseModel):
     temp_id: Optional[str] = None
     reply_to_id: Optional[int] = None
     reply_preview: Optional[str] = None
+    reply_from_id: Optional[int] = None
+    reply_from_name: Optional[str] = None
+    forward_from_id: Optional[int] = None
+    forward_from_name: Optional[str] = None
 
 def _user_pub(u: User, viewer_id: int = None):
     show_phone = not u.hide_phone or viewer_id == u.id
-    return {"id":u.id,"username":u.username,"display_name":u.display_name or u.username,
+    d = {"id":u.id,"username":u.username,"display_name":u.display_name or u.username,
             "avatar_emoji":u.avatar_emoji or "😊","avatar_color":u.avatar_color or "#2E86DE",
             "avatar_b64":u.avatar_b64,
             "phone": u.phone if show_phone else None,
             "birth_date":u.birth_date,
             "hide_online": bool(u.hide_online)}
+    if viewer_id is not None:
+        d.update(_presence_info(u, viewer_id))
+    return d
 
 def _me_payload(u: User, token=None):
     d = {**_user_pub(u, u.id),
@@ -312,7 +355,7 @@ def get_favs(db: Session = Depends(get_db), uid: int = Depends(_uid)):
     except: fav_ids = []
     msgs = db.query(Message).filter(Message.id.in_(fav_ids),
                                     Message.deleted_for_all==False).all()
-    return [_mdict(m) for m in msgs]
+    return _mdict_list(msgs, uid)
 
 # ── TYPING ────────────────────────────────────────────────────
 @app.post("/api/typing")
@@ -343,16 +386,17 @@ def chats(db: Session = Depends(get_db), uid: int = Depends(_uid)):
     for pid in partner_ids:
         u = db.query(User).filter(User.id==pid).first()
         if not u: continue
-        last = db.query(Message).filter(Message.group_id==None, or_(
+        recent = db.query(Message).filter(Message.group_id==None, or_(
             and_(Message.sender_id==uid, Message.recipient_id==pid),
             and_(Message.sender_id==pid, Message.recipient_id==uid)
-        )).order_by(Message.timestamp.desc()).first()
+        )).order_by(Message.timestamp.desc()).limit(30).all()
+        last = _last_visible(recent, uid)
         unread = db.query(Message).filter(Message.sender_id==pid,
             Message.recipient_id==uid, Message.is_read==False,
             Message.deleted_for_all==False).count()
         # черновики хранятся на клиенте
         last_text = ""
-        if last and not last.deleted_for_all:
+        if last:
             last_text = _msg_preview(last)
         out.append({**_user_pub(u, uid), "chat_key":f"dm_{u.id}",
             "last_text": last_text,
@@ -361,11 +405,12 @@ def chats(db: Session = Depends(get_db), uid: int = Depends(_uid)):
 
     # ── Saved Messages (self-chat) — всегда присутствует, как в Telegram ──
     me = db.query(User).filter(User.id==uid).first()
-    saved_last = db.query(Message).filter(
+    saved_recent = db.query(Message).filter(
         Message.group_id==None, Message.sender_id==uid, Message.recipient_id==uid,
-        Message.deleted_for_all==False).order_by(Message.timestamp.desc()).first()
+        Message.deleted_for_all==False).order_by(Message.timestamp.desc()).limit(30).all()
+    saved_last = _last_visible(saved_recent, uid)
     saved_text = ""
-    if saved_last and not saved_last.deleted_for_all:
+    if saved_last:
         saved_text = _msg_preview(saved_last)
     saved = {"id": uid, "username": me.username if me else "saved",
              "display_name": "Избранное", "is_saved": True,
@@ -406,16 +451,51 @@ def _msg_preview(m: Message) -> str:
         return "🖼️ Изображение"
     return text[:60]
 
-def _mdict(m: Message, db: Session = None):
+def _hidden_ids(m: Message) -> list:
+    try:
+        return [int(x) for x in json.loads(m.hidden_for or "[]")]
+    except Exception:
+        return []
+
+def _hidden_for(m: Message, uid: int) -> bool:
+    return uid in _hidden_ids(m)
+
+def _hide_for(m: Message, uid: int, db: Session):
+    ids = _hidden_ids(m)
+    if uid not in ids:
+        ids.append(uid)
+        m.hidden_for = json.dumps(ids)
+        db.commit()
+
+def _visible_for(m: Message, uid: int) -> bool:
+    return not m.deleted_for_all and not _hidden_for(m, uid)
+
+def _last_visible(msgs, uid: int):
+    for m in msgs:
+        if _visible_for(m, uid):
+            return m
+    return None
+
+def _mdict(m: Message, viewer_id: int = None):
     text, caption = _unpack_body(m)
-    return {"id":m.id,"sender_id":m.sender_id,"recipient_id":m.recipient_id,
+    d = {"id":m.id,"sender_id":m.sender_id,"recipient_id":m.recipient_id,
             "group_id":m.group_id,"text":text,"caption":caption or None,"msg_type":m.msg_type,
             "file_name":m.file_name,"reply_to_id":m.reply_to_id,
             "reply_preview": dec(m.reply_preview) if m.reply_preview else None,
+            "reply_from_id": m.reply_from_id,
+            "reply_from_name": m.reply_from_name,
+            "forward_from_id": m.forward_from_id,
+            "forward_from_name": m.forward_from_name,
             "reactions": json.loads(m.reactions or "{}"),
             "pinned":m.pinned,"is_read":m.is_read,"is_delivered":m.is_delivered,
             "edited":m.edited,"deleted":m.deleted_for_all,
             "timestamp":iso_utc(m.timestamp)}
+    if viewer_id == m.sender_id and m.is_read and m.read_at:
+        d["read_at"] = iso_utc(m.read_at)
+    return d
+
+def _mdict_list(msgs, uid: int):
+    return [_mdict(m, uid) for m in msgs if _visible_for(m, uid)]
 
 def _msg_targets(m: Message, db: Session):
     """All user ids that should receive a live update about this message."""
@@ -434,7 +514,14 @@ async def _broadcast_presence(uid: int, online: bool, db: Session, ws: WebSocket
     u = db.query(User).filter(User.id == uid).first()
     if not u:
         return
+    last_seen_iso = None
+    if not online and not manager.is_online(uid):
+        u.last_seen = _now_utc()
+        db.commit()
+        last_seen_iso = iso_utc(u.last_seen)
     ev = {"event": "presence", "user_id": uid, "online": online}
+    if last_seen_iso and not u.hide_online:
+        ev["last_seen"] = last_seen_iso
     partner_ids = set()
     for (s, r) in db.query(Message.sender_id, Message.recipient_id).filter(
             Message.group_id == None,
@@ -479,12 +566,20 @@ async def _persist_message(uid: int, msg: dict):
     tmp = msg.get("temp_id")
     r2id = msg.get("reply_to_id")
     r2pv = (msg.get("reply_preview") or "")[:200]
+    r2from = (msg.get("reply_from_name") or "")[:128] or None
+    r2from_id = msg.get("reply_from_id")
+    fwd_id = msg.get("forward_from_id")
+    fwd_name = (msg.get("forward_from_name") or "")[:128] or None
 
     db = SessionLocal()
     try:
         body = _pack_body(text, mtype, caption)
         kw = dict(sender_id=uid, enc_text=enc(body), msg_type=mtype, file_name=fname,
-                  reply_to_id=r2id, reply_preview=enc(r2pv) if r2pv else None)
+                  reply_to_id=r2id, reply_preview=enc(r2pv) if r2pv else None,
+                  reply_from_id=int(r2from_id) if r2from_id else None,
+                  reply_from_name=r2from,
+                  forward_from_id=int(fwd_id) if fwd_id else None,
+                  forward_from_name=fwd_name)
         if gid:
             gid = int(gid)
             if not db.query(GroupMember).filter_by(group_id=gid, user_id=uid).first():
@@ -524,24 +619,25 @@ async def dm_history(other: int, db: Session = Depends(get_db), uid: int = Depen
         and_(Message.sender_id==uid, Message.recipient_id==other),
         and_(Message.sender_id==other, Message.recipient_id==uid)
     )).order_by(Message.timestamp.asc()).all()
+    now = _now_utc()
     newly_read_max = 0
+    read_at_iso = None
     for m in msgs:
         if m.recipient_id==uid and not m.is_read:
-            m.is_read=True
+            m.is_read = True
+            m.read_at = now
+            read_at_iso = iso_utc(now)
             if m.id > newly_read_max: newly_read_max = m.id
         if m.sender_id==uid and not m.is_delivered:
-            m.is_delivered=True
+            m.is_delivered = True
     db.commit()
-    # tell the other person their messages were read (live blue ticks)
     if newly_read_max:
         await manager.send_encrypted_message(
-            {"event":"read","msg_id":newly_read_max,"reader_id":uid}, other)
-    return [_mdict(m) for m in msgs]
+            {"event":"read","msg_id":newly_read_max,"reader_id":uid,"read_at": read_at_iso}, other)
+    return _mdict_list(msgs, uid)
 
 @app.post("/api/messages/{mid}/read")
 async def mark_read(mid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
-    # Works for BOTH direct and group messages. Group messages have recipient_id=None,
-    # so the old recipient-only filter never marked them read.
     m = db.query(Message).filter(Message.id==mid).first()
     if not m:
         return {"ok": True}
@@ -550,49 +646,77 @@ async def mark_read(mid: int, db: Session = Depends(get_db), uid: int = Depends(
         if not db.query(GroupMember).filter_by(group_id=m.group_id, user_id=uid).first():
             return {"ok": True}
         unread_msgs = db.query(Message).filter(
-            Message.group_id==m.group_id, Message.sender_id!=uid,
-            Message.is_read==False, Message.id<=mid
+            Message.group_id==m.group_id, Message.sender_id!=uid, Message.id<=mid
         ).all()
-        senders = set()
-        for msg in unread_msgs:
-            msg.is_read = True; senders.add(msg.sender_id)
+        to_mark = [msg for msg in unread_msgs
+                   if not db.query(MessageRead).filter_by(message_id=msg.id, user_id=uid).first()]
+        if not to_mark:
+            return {"ok": True, "marked": 0}
+        _record_group_reads(uid, to_mark, db)
         db.commit()
-        ev = {"event":"read","msg_id":mid,"reader_id":uid,"group_id":m.group_id}
+        senders = {msg.sender_id for msg in to_mark}
+        read_at_iso = iso_utc(_now_utc())
+        ev = {"event":"read","msg_id":mid,"reader_id":uid,"group_id":m.group_id,"read_at": read_at_iso}
         for s in senders:
             await manager.send_encrypted_message(ev, s)
-        return {"ok": True, "marked": len(unread_msgs)}
+        return {"ok": True, "marked": len(to_mark)}
 
-    # direct message
     if m.recipient_id != uid:
         return {"ok": True}
     sender_id = m.sender_id
-    unread_msgs = db.query(Message).filter(
-        Message.recipient_id==uid, Message.sender_id==sender_id,
-        Message.is_read==False, Message.id<=mid
-    ).all()
-    for msg in unread_msgs:
-        msg.is_read = True
+    unread_msgs = _mark_dm_reads(uid, sender_id, mid, db)
+    if not unread_msgs:
+        return {"ok": True, "marked": 0}
     db.commit()
-    ev = {"event":"read","msg_id":mid,"reader_id":uid}
+    read_at_iso = iso_utc(unread_msgs[-1].read_at)
+    ev = {"event":"read","msg_id":mid,"reader_id":uid,"read_at": read_at_iso}
     await manager.send_encrypted_message(ev, sender_id)
     return {"ok": True, "marked": len(unread_msgs)}
+
+@app.get("/api/messages/{mid}/read-info")
+def msg_read_info(mid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    m = db.query(Message).filter(Message.id==mid).first()
+    if not m:
+        raise HTTPException(404, "Not found")
+    if m.sender_id != uid:
+        raise HTTPException(403, "Only sender can view read info")
+    readers = []
+    if m.group_id:
+        if not db.query(GroupMember).filter_by(group_id=m.group_id, user_id=uid).first():
+            raise HTTPException(403, "Not a member")
+        for r in db.query(MessageRead).filter(MessageRead.message_id==mid).order_by(MessageRead.read_at.asc()).all():
+            u = db.query(User).filter(User.id==r.user_id).first()
+            if u:
+                readers.append({"user_id": u.id, "display_name": u.display_name or u.username,
+                                "read_at": iso_utc(r.read_at)})
+    elif m.is_read and m.recipient_id:
+        u = db.query(User).filter(User.id==m.recipient_id).first()
+        readers.append({"user_id": m.recipient_id,
+                        "display_name": (u.display_name or u.username) if u else "?",
+                        "read_at": iso_utc(m.read_at) if m.read_at else None})
+    return {"readers": readers, "is_delivered": bool(m.is_delivered), "is_read": bool(m.is_read)}
 
 @app.get("/api/groups/{gid}/messages")
 async def grp_history(gid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
     if not db.query(GroupMember).filter_by(group_id=gid, user_id=uid).first():
         raise HTTPException(403, "Not a member")
     msgs = db.query(Message).filter(Message.group_id==gid).order_by(Message.timestamp.asc()).all()
-    # помечаем доставленными И прочитанными (мы открыли чат)
+    to_read = []
     senders = set()
     for m in msgs:
         if m.sender_id != uid:
-            if not m.is_delivered: m.is_delivered = True
-            if not m.is_read:
-                m.is_read = True; senders.add(m.sender_id)
+            if not m.is_delivered:
+                m.is_delivered = True
+            if not db.query(MessageRead).filter_by(message_id=m.id, user_id=uid).first():
+                to_read.append(m)
+                senders.add(m.sender_id)
+    if to_read:
+        _record_group_reads(uid, to_read, db)
     db.commit()
-    out = [_mdict(m) for m in msgs]
-    if msgs:
-        ev = {"event":"read","msg_id":msgs[-1].id,"reader_id":uid,"group_id":gid}
+    out = _mdict_list(msgs, uid)
+    if msgs and to_read:
+        read_at_iso = iso_utc(_now_utc())
+        ev = {"event":"read","msg_id":msgs[-1].id,"reader_id":uid,"group_id":gid,"read_at": read_at_iso}
         for s in senders:
             await manager.send_encrypted_message(ev, s)
     return out
@@ -618,13 +742,21 @@ async def del_msg(mid: int, for_all: bool = False,
             await manager.send_encrypted_message(ev, m.recipient_id)
             await manager.send_encrypted_message(ev, m.sender_id)
         return {"status":"deleted_for_all"}
-    if m.sender_id==uid or (m.recipient_id==uid and age<=7200):
-        db.delete(m); db.commit()
-        ev = {"event":"deleted","id":m.id,"group_id":m.group_id,
-              "recipient_id":m.recipient_id,"sender_id":m.sender_id,"self_only":True}
-        await manager.send_encrypted_message(ev, uid)
-        return {"status":"deleted"}
-    raise HTTPException(403, "Можно удалить только в течение 2 часов")
+    # удалить только у себя — скрываем, не трогаем запись (собеседник продолжит видеть)
+    allowed = False
+    if m.group_id:
+        allowed = bool(db.query(GroupMember).filter_by(group_id=m.group_id, user_id=uid).first())
+    elif m.sender_id == uid:
+        allowed = True
+    elif m.recipient_id == uid and age <= 7200:
+        allowed = True
+    if not allowed:
+        raise HTTPException(403, "Можно удалить только в течение 2 часов")
+    _hide_for(m, uid, db)
+    ev = {"event":"deleted","id":m.id,"group_id":m.group_id,
+          "recipient_id":m.recipient_id,"sender_id":m.sender_id,"self_only":True}
+    await manager.send_encrypted_message(ev, uid)
+    return {"status":"deleted"}
 
 @app.patch("/api/messages/{mid}")
 async def edit_msg(mid: int, d: MsgEdit, db: Session = Depends(get_db), uid: int = Depends(_uid)):
@@ -674,7 +806,7 @@ def pinned_msgs(chat_type: str, chat_id: int, db: Session = Depends(get_db), uid
     else: q = q.filter(Message.group_id==None, or_(
         and_(Message.sender_id==uid, Message.recipient_id==chat_id),
         and_(Message.sender_id==chat_id, Message.recipient_id==uid)))
-    return [_mdict(m) for m in q.order_by(Message.timestamp.asc()).all()]
+    return _mdict_list(q.order_by(Message.timestamp.asc()).all(), uid)
 
 # ── FILES ─────────────────────────────────────────────────────
 _updir = pathlib.Path(__file__).parent.parent.parent / "uploads"
@@ -723,9 +855,10 @@ def get_group(gid: int, db: Session = Depends(get_db), uid: int = Depends(_uid))
     g = db.query(Group).filter(Group.id==gid).first()
     if not g: raise HTTPException(404, "Группа не найдена")
     cnt = db.query(GroupMember).filter(GroupMember.group_id==gid).count()
-    last = db.query(Message).filter(Message.group_id==gid).order_by(Message.timestamp.desc()).first()
+    recent = db.query(Message).filter(Message.group_id==gid).order_by(Message.timestamp.desc()).limit(30).all()
+    last = _last_visible(recent, uid)
     last_text = ""
-    if last and not last.deleted_for_all:
+    if last:
         last_text = _msg_preview(last)
     unread = db.query(Message).filter(Message.group_id==gid,
         Message.sender_id!=uid, Message.is_read==False,
@@ -742,12 +875,13 @@ def my_groups(db: Session = Depends(get_db), uid: int = Depends(_uid)):
         g = db.query(Group).filter(Group.id==gm.group_id).first()
         if g:
             cnt = db.query(GroupMember).filter(GroupMember.group_id==g.id).count()
-            last = db.query(Message).filter(Message.group_id==g.id).order_by(Message.timestamp.desc()).first()
+            recent = db.query(Message).filter(Message.group_id==g.id).order_by(Message.timestamp.desc()).limit(30).all()
+            last = _last_visible(recent, uid)
             unread = db.query(Message).filter(Message.group_id==g.id,
                 Message.sender_id!=uid, Message.is_read==False,
                 Message.deleted_for_all==False).count()
             last_text = ""
-            if last and not last.deleted_for_all:
+            if last:
                 last_text = _msg_preview(last)
             out.append({"id":g.id,"name":g.name,"avatar_emoji":g.avatar_emoji,
                         "avatar_b64":g.avatar_b64,"member_count":cnt,"is_admin":gm.is_admin,
@@ -777,11 +911,13 @@ async def _notify_group_members(gid: int, ev: dict, db: Session):
     for mid in _group_member_ids(gid, db):
         await manager.send_encrypted_message(ev, mid)
 
-def _shared_items(base_q, kind: str):
+def _shared_items(base_q, kind: str, uid: int):
     if kind == "links":
         url_re = re.compile(r'https?://[^\s<>"\'\]]+')
         out, seen = [], set()
         for m in base_q.order_by(Message.timestamp.desc()).limit(500).all():
+            if not _visible_for(m, uid):
+                continue
             text, caption = _unpack_body(m)
             for src in (text or "", caption or ""):
                 for url in url_re.findall(src):
@@ -795,8 +931,9 @@ def _shared_items(base_q, kind: str):
         return out
     type_map = {"media": "image", "files": "file", "voice": "voice"}
     mtype = type_map.get(kind, "image")
-    q = base_q.filter(Message.msg_type == mtype).order_by(Message.timestamp.desc()).limit(200).all()
-    return [_mdict(m) for m in q]
+    q = [m for m in base_q.filter(Message.msg_type == mtype).order_by(Message.timestamp.desc()).limit(200).all()
+         if _visible_for(m, uid)]
+    return _mdict_list(q, uid)
 
 @app.post("/api/groups/{gid}/members")
 async def add_group_members(gid: int, d: GroupMembersIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
@@ -898,7 +1035,7 @@ def group_shared_content(gid: int, kind: str = "media", db: Session = Depends(ge
     if not db.query(GroupMember).filter_by(group_id=gid, user_id=uid).first():
         raise HTTPException(403, "Not a member")
     base_q = db.query(Message).filter(Message.group_id == gid, Message.deleted_for_all == False)
-    return _shared_items(base_q, kind)
+    return _shared_items(base_q, kind, uid)
 
 # ── SHARED MEDIA / FILES (DM) ─────────────────────────────────
 @app.get("/api/shared/{other}")
@@ -913,7 +1050,7 @@ def shared_content(other: int, kind: str = "media", db: Session = Depends(get_db
             and_(Message.sender_id == other, Message.recipient_id == uid),
         ),
     )
-    return _shared_items(base_q, kind)
+    return _shared_items(base_q, kind, uid)
 
 # ── COMMON GROUPS between two users ───────────────────────────
 @app.get("/api/common_groups/{other}")
@@ -933,15 +1070,21 @@ def common_groups(other: int, db: Session = Depends(get_db), uid: int = Depends(
 # ── ONLINE STATUS ─────────────────────────────────────────────
 @app.get("/api/online")
 def online_users(db: Session = Depends(get_db), uid: int = Depends(_uid)):
-    online = manager.get_online_users()
-    # фильтруем тех, кто скрыл статус
-    result = {}
-    for oid in online:
-        u = db.query(User).filter(User.id==oid).first()
-        if u and not u.hide_online:
-            result[oid] = True
-        elif u and u.id == uid:
-            result[oid] = True  # себя всегда показываем себе
+    partner_ids = set()
+    for s, r in db.query(Message.sender_id, Message.recipient_id).filter(
+            Message.group_id == None,
+            or_(Message.sender_id == uid, Message.recipient_id == uid)).all():
+        partner_ids.add(s if s != uid else r)
+    partner_ids.discard(uid); partner_ids.discard(None)
+    result = {str(uid): {"online": True}}
+    online_ids = set(manager.get_online_users())
+    for pid in partner_ids:
+        u = db.query(User).filter(User.id == pid).first()
+        if not u:
+            continue
+        result[str(pid)] = _presence_info(u, uid)
+        if result[str(pid)]["online"]:
+            result[str(pid)] = {"online": True}
     return result
 
 # ── WEBSOCKET ─────────────────────────────────────────────────
