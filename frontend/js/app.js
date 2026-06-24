@@ -7,6 +7,8 @@ const API = location.origin + '/api';
 let ME = null, NET = null, ACTIVE = null;
 let OPEN_SEQ = 0;  // guards async message loads when switching chats quickly
 let CHATS = [], GROUPS = [], SEARCH_RES = [], UNREAD = {}, PINS = new Set(), FOLDERS = {}, CUR_FOLDER = 'Все';
+let CHAT_ORDERS = {};
+const REACT_CACHE = new Map();
 let FS = 16, SOUND = true;
 let AUTH_PHONE = '', PENDING = null;
 let selGM = new Set(), selGE = '👥', selGAvB64 = null, myAvB64Pending = null;
@@ -62,7 +64,7 @@ const FOLDER_E = ['📁','💼','👥','⭐','🔥','📌','🏠','🎓','🔬',
 
 /* ═══ INIT ═══ */
 document.addEventListener('DOMContentLoaded', () => {
-  loadTheme(); loadFont(); loadSound(); loadChatTheme(); loadListWidth();
+  loadTheme(); loadFont(); loadSound(); loadChatTheme(); loadListWidth(); loadChatOrders();
   const mi = document.getElementById('msg-inp');
   mi.addEventListener('keydown', onKey);
   mi.addEventListener('paste', handlePaste);
@@ -88,6 +90,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   window.addEventListener('resize', clampListWidth);
   buildThemePicker();
+  initReactPop();
 
   const saved = sessionStorage.getItem('ap_s') || localStorage.getItem('ap_s_bk');
   if (saved) { try { restoreSession(JSON.parse(saved)); } catch { showAuth(); } }
@@ -283,16 +286,20 @@ function loadChatTheme() {
   setChatTheme(id || 'classic', false);
 }
 function applyChatBg() {
-  const msgs = document.getElementById('msgs');
-  if (!msgs) return;
+  const ws = document.getElementById('chat-workspace');
+  if (!ws) return;
   if (CHAT_BG_IMAGE) {
-    msgs.style.backgroundImage = `url('${CHAT_BG_IMAGE}')`;
-    msgs.style.backgroundSize = 'cover';
-    msgs.style.backgroundPosition = 'center';
-    msgs.style.backgroundColor = 'transparent';
+    ws.style.backgroundImage = `url('${CHAT_BG_IMAGE}')`;
+    ws.style.backgroundSize = 'cover';
+    ws.style.backgroundPosition = 'center';
+    ws.style.backgroundColor = 'transparent';
+    ws.classList.add('has-custom-bg');
   } else {
-    msgs.style.backgroundImage = '';
-    msgs.style.background = 'transparent';
+    ws.style.backgroundImage = '';
+    ws.style.backgroundSize = '';
+    ws.style.backgroundPosition = '';
+    ws.style.backgroundColor = '';
+    ws.classList.remove('has-custom-bg');
   }
 }
 function handleChatBgImage(inp) {
@@ -834,6 +841,112 @@ function touchChatRow(chat, preview, ts) {
 }
 function sortByLastTs(items) {
   return items.sort((a, b) => (b.last_ts || '').localeCompare(a.last_ts || ''));
+}
+function loadChatOrders() {
+  try { CHAT_ORDERS = JSON.parse(lsGet('chatorders') || '{}'); } catch { CHAT_ORDERS = {}; }
+}
+function saveChatOrders() {
+  lsSet('chatorders', JSON.stringify(CHAT_ORDERS));
+}
+function getChatOrderKeys() {
+  return CHAT_ORDERS[CUR_FOLDER] || [];
+}
+function setChatOrderKeys(keys) {
+  CHAT_ORDERS[CUR_FOLDER] = keys;
+  saveChatOrders();
+}
+function chatItemKey(x) {
+  return x.member_count !== undefined ? `g_${x.id}` : x.chat_key;
+}
+function sortByCustomOrder(items, getKey) {
+  const order = getChatOrderKeys();
+  if (!order.length) return sortByLastTs([...items]);
+  const idx = new Map(order.map((k, i) => [k, i]));
+  return [...items].sort((a, b) => {
+    const ka = getKey(a), kb = getKey(b);
+    const ia = idx.has(ka) ? idx.get(ka) : 999999;
+    const ib = idx.has(kb) ? idx.get(kb) : 999999;
+    if (ia !== ib) return ia - ib;
+    return (b.last_ts || '').localeCompare(a.last_ts || '');
+  });
+}
+function persistChatOrderFromList(list) {
+  if (!list) return;
+  const keys = [...list.querySelectorAll('.ci[data-key]')].map(el => el.dataset.key).filter(Boolean);
+  if (keys.length) setChatOrderKeys(keys);
+}
+function bindCiDrag(el, key) {
+  if (!el || !key) return;
+  let timer = null, dragActive = false, moved = false, sx = 0, sy = 0, pid = null;
+  const list = () => document.getElementById('contacts');
+  const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const cleanup = () => {
+    clearTimer();
+    dragActive = false;
+    el.classList.remove('ci-dragging');
+    list()?.classList.remove('drag-reorder');
+    document.body.classList.remove('chat-dragging');
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
+    if (pid != null && el.releasePointerCapture) { try { el.releasePointerCapture(pid); } catch {} }
+    pid = null;
+  };
+  const onMove = e => {
+    if (!dragActive) {
+      if (timer && (Math.abs(e.clientX - sx) > 12 || Math.abs(e.clientY - sy) > 12)) clearTimer();
+      return;
+    }
+    e.preventDefault();
+    moved = true;
+    const listEl = list();
+    if (!listEl) return;
+    const pinned = PINS.has(key);
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const target = under?.closest?.('.ci[data-key]');
+    if (!target || target === el || !listEl.contains(target)) return;
+    if (PINS.has(target.dataset.key) !== pinned) return;
+    const rect = target.getBoundingClientRect();
+    const before = e.clientY < rect.top + rect.height / 2;
+    if (before) {
+      if (el !== target && el.nextSibling !== target) listEl.insertBefore(el, target);
+    } else {
+      const next = target.nextSibling;
+      if (el !== next) listEl.insertBefore(el, next);
+    }
+  };
+  const onUp = () => {
+    const wasDrag = dragActive;
+    if (dragActive && moved) persistChatOrderFromList(list());
+    if (wasDrag) {
+      el._dragBlockClick = true;
+      setTimeout(() => { el._dragBlockClick = false; }, 400);
+    }
+    cleanup();
+  };
+  el.addEventListener('pointerdown', e => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    if (SEARCH_Q || UNREAD_FILTER) return;
+    sx = e.clientX; sy = e.clientY;
+    pid = e.pointerId;
+    clearTimer();
+    timer = setTimeout(() => {
+      timer = null;
+      dragActive = true;
+      moved = false;
+      hideCtx();
+      el.classList.add('ci-dragging');
+      list()?.classList.add('drag-reorder');
+      document.body.classList.add('chat-dragging');
+      if (pid != null) { try { el.setPointerCapture(pid); } catch {} }
+      try { navigator.vibrate?.(10); } catch {}
+      document.addEventListener('pointermove', onMove, { passive: false });
+      document.addEventListener('pointerup', onUp);
+      document.addEventListener('pointercancel', onUp);
+    }, 420);
+  });
+  el.addEventListener('pointerup', () => { if (!dragActive) clearTimer(); });
+  el.addEventListener('pointercancel', () => { if (!dragActive) clearTimer(); });
 }
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -1502,18 +1615,22 @@ function renderContacts() {
     chats = chats.filter(c => chatUnreadCount(c.chat_key, c.unread) > 0);
     groups = groups.filter(g => chatUnreadCount(`g_${g.id}`, g.unread) > 0);
   }
-  const pinned = sortByLastTs([
+  const pinned = sortByCustomOrder([
     ...groups.filter(g => PINS.has(`g_${g.id}`)),
     ...chats.filter(c => PINS.has(c.chat_key))
-  ]);
-  const restG = sortByLastTs(groups.filter(g => !PINS.has(`g_${g.id}`)));
-  const restC = sortByLastTs(chats.filter(c => !PINS.has(c.chat_key)));
+  ], chatItemKey);
+  const restG = sortByCustomOrder(groups.filter(g => !PINS.has(`g_${g.id}`)), g => `g_${g.id}`);
+  const restC = sortByCustomOrder(chats.filter(c => !PINS.has(c.chat_key)), c => c.chat_key);
   if (!pinned.length && !restG.length && !restC.length) {
     list.innerHTML = emptyHtml(UNREAD_FILTER ? 'Нет непрочитанных' : CUR_FOLDER !== 'Все' ? 'Папка пуста' : 'Нет чатов. Найдите коллегу через поиск');
     return;
   }
   const all = [...pinned, ...restG, ...restC];
-  all.forEach(x => list.appendChild(x.member_count !== undefined ? mkGCI(x) : mkCCI(x)));
+  all.forEach(x => {
+    const el = x.member_count !== undefined ? mkGCI(x) : mkCCI(x);
+    list.appendChild(el);
+    bindCiDrag(el, chatItemKey(x));
+  });
   renderRail();
   twemojify(list);
   if (typeof bumpTitleBadge === 'function' && !document.hidden && document.hasFocus()) {
@@ -1577,6 +1694,7 @@ function mkCCI(c) {
   const isSaved = isSavedChat(c);
   const isActive = ACTIVE?.type === 'dm' && (isSaved ? isActiveSaved() : (ACTIVE.id === c.id && !ACTIVE.saved));
   d.className = 'ci' + (isActive ? ' act' : '') + (PINS.has(key) ? ' pinned' : '');
+  d.dataset.key = key;
   const time = c.last_ts ? fmtTime(new Date(c.last_ts)) : '';
   const unread = chatUnreadCount(key, c.unread);
   const draft = DRAFTS[isSaved ? 'saved' : `dm_${c.id}`];
@@ -1596,7 +1714,7 @@ function mkCCI(c) {
       <div class="ci-top"><span class="ci-name">${esc(c.display_name)}</span><span class="ci-time">${time}</span></div>
       <div class="ci-bot"><span class="ci-sub">${subHtml}</span>${unread ? `<div class="ub">${unread > 99 ? '99+' : unread}</div>` : pinIco}</div>
     </div>`;
-  d.addEventListener('click', () => openDM(c));
+  d.addEventListener('click', () => { if (d._dragBlockClick) return; openDM(c); });
   d.addEventListener('contextmenu', e => { e.preventDefault(); chatCtx(e, key, c); });
   return d;
 }
@@ -1604,6 +1722,7 @@ function mkGCI(g) {
   const key = `g_${g.id}`;
   const d = document.createElement('div');
   d.className = 'ci' + (ACTIVE?.type === 'group' && ACTIVE?.id === g.id ? ' act' : '') + (PINS.has(key) ? ' pinned' : '');
+  d.dataset.key = key;
   const unread = chatUnreadCount(`g_${g.id}`, g.unread);
   const time = g.last_ts ? fmtTime(new Date(g.last_ts)) : '';
   const draft = DRAFTS[`group_${g.id}`];
@@ -1614,7 +1733,7 @@ function mkGCI(g) {
       <div class="ci-top"><span class="ci-name">${esc(g.name)}</span><span class="ci-time">${time}</span></div>
       <div class="ci-bot"><span class="ci-sub">${subHtml}</span>${unread ? `<div class="ub">${unread > 99 ? '99+' : unread}</div>` : pinIco}</div>
     </div>`;
-  d.addEventListener('click', () => openGroup(g));
+  d.addEventListener('click', () => { if (d._dragBlockClick) return; openGroup(g); });
   d.addEventListener('contextmenu', e => { e.preventDefault(); chatCtx(e, key, g); });
   return d;
 }
@@ -2496,27 +2615,13 @@ function appendBub(area, m, mine, sender = null, animate = true) {
   }
 
   // reactions
-  const reacts = m.reactions || {};
-  if (Object.keys(reacts).length) {
-    const rr = document.createElement('div'); rr.className = 'reacts';
-    for (const [em, uids] of Object.entries(reacts)) {
-      const r = document.createElement('div');
-      r.className = 'react' + (uids.includes(ME.id) ? ' mine' : '');
-      r.innerHTML = `${em} <span class="react-n">${uids.length}</span>`;
-      r.onclick = e => { e.stopPropagation(); toggleReact(m.id, em); };
-      rr.appendChild(r);
-    }
-    bub.appendChild(rr);
-  }
+  mountReactions(bub, m.id, m.reactions || {});
 
-  bub.addEventListener('contextmenu', e => { e.preventDefault(); msgCtx(e, m, mine); });
-  bub.addEventListener('dblclick', e => { if (SELECT_MODE) return; e.preventDefault(); showReactPop(e, m.id); });
-  bub.addEventListener('click', e => {
-    if (!SELECT_MODE) return;
-    if (m.id === 'tmp') return;
-    e.stopPropagation();
-    toggleSelect(m);
+  bub.addEventListener('contextmenu', e => {
+    if (row.dataset.lpFired) { e.preventDefault(); return; }
+    e.preventDefault(); msgCtx(e, m, mine);
   });
+  bub.addEventListener('dblclick', e => { if (SELECT_MODE) return; e.preventDefault(); showReactPop(e, m.id); });
   bw.appendChild(bub);
 
   if (!inlineMeta) {
@@ -2529,8 +2634,80 @@ function appendBub(area, m, mine, sender = null, animate = true) {
     bm.innerHTML = meta;
     bw.appendChild(bm);
   }
-  row.appendChild(bw); area.appendChild(row);
+  row.appendChild(bw);
+  row.appendChild(createMsgSelChk());
+  bindMsgSelectRow(row, m);
+  area.appendChild(row);
   twemojify(row);
+}
+
+function createMsgSelChk() {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mr-selchk';
+  btn.setAttribute('aria-label', 'Выбрать сообщение');
+  btn.tabIndex = -1;
+  btn.innerHTML = '<svg viewBox="0 0 12 10" fill="none" aria-hidden="true"><path d="M1 5.2 4.2 8.4 11 1.2" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  return btn;
+}
+function bindMsgSelectRow(row, m) {
+  if (!row || !m || m.id === 'tmp') return;
+  const chk = row.querySelector('.mr-selchk');
+  const canSelect = () => SELECT_MODE && m.id !== 'tmp';
+  const onSelectTap = e => {
+    if (!canSelect()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    toggleSelect(m);
+  };
+  row.addEventListener('click', e => {
+    if (!canSelect()) return;
+    if (e.target.closest('.react, .vb-btn, .img-bub, .fb, .ticks-click, .rq, .fwd-from')) return;
+    onSelectTap(e);
+  });
+  chk?.addEventListener('click', onSelectTap);
+  bindMsgLongPress(row, m);
+}
+function bindMsgLongPress(row, m) {
+  if (!row || !m || m.id === 'tmp') return;
+  let timer = null;
+  let sx = 0, sy = 0;
+  const LONG_MS = 480;
+  const MOVE_TOL = 14;
+  const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  const fire = e => {
+    clear();
+    e?.preventDefault?.();
+    row.dataset.lpFired = '1';
+    setTimeout(() => { delete row.dataset.lpFired; }, 500);
+    hideCtx(); hideEP(); hideRP(); hideFmtPop();
+    enterSelect(m);
+    try { navigator.vibrate?.(12); } catch {}
+  };
+  const start = (x, y, e) => {
+    if (SELECT_MODE) return;
+    sx = x; sy = y;
+    clear();
+    timer = setTimeout(() => fire(e), LONG_MS);
+  };
+  const move = (x, y) => {
+    if (!timer) return;
+    if (Math.abs(x - sx) > MOVE_TOL || Math.abs(y - sy) > MOVE_TOL) clear();
+  };
+  row.addEventListener('mousedown', e => { if (e.button !== 0) return; start(e.clientX, e.clientY, e); });
+  row.addEventListener('mousemove', e => move(e.clientX, e.clientY));
+  row.addEventListener('mouseup', clear);
+  row.addEventListener('mouseleave', clear);
+  row.addEventListener('touchstart', e => {
+    if (!e.touches[0]) return;
+    start(e.touches[0].clientX, e.touches[0].clientY, e);
+  }, { passive: false });
+  row.addEventListener('touchmove', e => {
+    if (!e.touches[0]) return;
+    move(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  row.addEventListener('touchend', clear);
+  row.addEventListener('touchcancel', clear);
 }
 
 /* ═══ VOICE PLAYER ═══ */
@@ -3206,23 +3383,142 @@ function msgCtx(e, m, mine) {
 }
 function showReactPop(e, msgId) {
   hideCtx();
-  const rp = document.getElementById('react-pop'); rp.innerHTML = '';
-  RP_EMOJIS.forEach(em => {
-    const b = document.createElement('div'); b.className = 'rp-e'; b.textContent = em;
-    b.onclick = ev => { ev.stopPropagation(); hideRP(); toggleReact(msgId, em); };
-    rp.appendChild(b);
-  });
+  hideRP();
+  const rp = document.getElementById('react-pop');
+  initReactPop();
+  rp.dataset.msgId = String(msgId);
   rp.style.left = Math.min(e.clientX - 140, window.innerWidth - 310) + 'px';
   rp.style.top = Math.max(8, e.clientY - 58) + 'px';
-  rp.style.display = 'flex'; e.stopPropagation();
-  twemojify(rp);
+  rp.style.display = 'flex';
+  e.stopPropagation();
 }
-function hideRP() { document.getElementById('react-pop').style.display = 'none'; }
-async function toggleReact(msgId, emoji) {
-  try {
-    const r = await req(`/messages/${msgId}/react`, 'POST', { emoji });
-    applyReactions(msgId, r.reactions);
-  } catch (e) { toast(e.message, 'e'); }
+function hideRP() {
+  const rp = document.getElementById('react-pop');
+  if (rp) rp.style.display = 'none';
+}
+function initReactPop() {
+  const rp = document.getElementById('react-pop');
+  if (!rp || rp.dataset.ready) return;
+  rp.innerHTML = '';
+  RP_EMOJIS.forEach(em => {
+    const b = document.createElement('div');
+    b.className = 'rp-e';
+    b.dataset.emoji = em;
+    b.textContent = em;
+    rp.appendChild(b);
+  });
+  rp.addEventListener('click', ev => {
+    const btn = ev.target.closest('.rp-e');
+    if (!btn) return;
+    ev.stopPropagation();
+    const id = rp.dataset.msgId;
+    if (!id) return;
+    hideRP();
+    toggleReact(id, btn.dataset.emoji);
+  });
+  rp.dataset.ready = '1';
+}
+function cloneReactions(reactions) {
+  const out = {};
+  for (const [k, v] of Object.entries(reactions || {})) out[k] = [...v];
+  return out;
+}
+function toggleReactionLocal(reactions, emoji, uid) {
+  const r = cloneReactions(reactions);
+  let lst = r[emoji] ? [...r[emoji]] : [];
+  const i = lst.indexOf(uid);
+  if (i >= 0) lst.splice(i, 1);
+  else lst.push(uid);
+  if (lst.length) r[emoji] = lst;
+  else delete r[emoji];
+  return r;
+}
+function buildReactEl(msgId, em, uids) {
+  const el = document.createElement('div');
+  el.className = 'react' + (uids.includes(ME.id) ? ' mine' : '');
+  el.dataset.emoji = em;
+  const emSpan = document.createElement('span');
+  emSpan.className = 'react-e';
+  emSpan.textContent = em;
+  const nSpan = document.createElement('span');
+  nSpan.className = 'react-n';
+  nSpan.textContent = String(uids.length);
+  el.appendChild(emSpan);
+  el.appendChild(nSpan);
+  el.onclick = e => { e.stopPropagation(); toggleReact(msgId, em); };
+  return el;
+}
+function mountReactions(bub, msgId, reactions) {
+  const entries = Object.entries(reactions || {});
+  if (!entries.length) return;
+  REACT_CACHE.set(String(msgId), cloneReactions(reactions));
+  const rr = document.createElement('div');
+  rr.className = 'reacts';
+  for (const [em, uids] of entries) rr.appendChild(buildReactEl(msgId, em, uids));
+  bub.appendChild(rr);
+}
+function applyReactionsDOM(msgId, reactions) {
+  const bub = document.querySelector(`.bub[data-id="${msgId}"]`);
+  if (!bub) return;
+  const entries = Object.entries(reactions || {});
+  let rr = bub.querySelector('.reacts');
+  if (!entries.length) {
+    rr?.remove();
+    return;
+  }
+  if (!rr) {
+    rr = document.createElement('div');
+    rr.className = 'reacts';
+    bub.appendChild(rr);
+  }
+  const existing = new Map([...rr.querySelectorAll('.react[data-emoji]')].map(el => [el.dataset.emoji, el]));
+  const seen = new Set();
+  for (const [em, uids] of entries) {
+    seen.add(em);
+    const mine = uids.includes(ME.id);
+    const count = uids.length;
+    let el = existing.get(em);
+    if (!el) {
+      rr.appendChild(buildReactEl(msgId, em, uids));
+    } else {
+      el.classList.toggle('mine', mine);
+      const n = el.querySelector('.react-n');
+      if (n && n.textContent !== String(count)) n.textContent = String(count);
+    }
+  }
+  existing.forEach((el, em) => { if (!seen.has(em)) el.remove(); });
+}
+function reactionsEqual(a, b) {
+  a = a || {}; b = b || {};
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) {
+    const va = (a[k] || []).slice().sort((x, y) => x - y).join(',');
+    const vb = (b[k] || []).slice().sort((x, y) => x - y).join(',');
+    if (va !== vb) return false;
+  }
+  return true;
+}
+function applyReactions(msgId, reactions) {
+  const r = reactions || {};
+  const id = String(msgId);
+  const prev = REACT_CACHE.get(id);
+  if (prev && reactionsEqual(prev, r)) return;
+  REACT_CACHE.set(id, cloneReactions(r));
+  applyReactionsDOM(msgId, r);
+}
+function toggleReact(msgId, emoji) {
+  hideRP();
+  const id = String(msgId);
+  const prev = cloneReactions(REACT_CACHE.get(id) || {});
+  const next = toggleReactionLocal(prev, emoji, ME.id);
+  applyReactions(msgId, next);
+  try { navigator.vibrate?.(8); } catch {}
+  req(`/messages/${msgId}/react`, 'POST', { emoji })
+    .then(res => applyReactions(msgId, res.reactions || {}))
+    .catch(err => {
+      applyReactions(msgId, prev);
+      toast(err.message || 'Ошибка', 'e');
+    });
 }
 async function togglePinMsg(id) {
   try {
@@ -3304,10 +3600,12 @@ let SELECT_MODE = false;
 const SELECTED = new Map();   // id -> message object
 function enterSelect(m) {
   SELECT_MODE = true;
+  hideCtx(); hideEP(); hideRP(); hideFmtPop();
   document.getElementById('dialog').classList.add('select-mode');
   document.getElementById('select-bar').style.display = 'flex';
   SELECTED.clear();
-  if (m) toggleSelect(m);
+  document.querySelectorAll('.mr.sel').forEach(r => r.classList.remove('sel'));
+  if (m) toggleSelect(m, true);
   else updateSelectBar();
 }
 function exitSelect() {
@@ -3317,12 +3615,12 @@ function exitSelect() {
   document.querySelectorAll('.mr.sel').forEach(r => r.classList.remove('sel'));
   SELECTED.clear();
 }
-function toggleSelect(m) {
+function toggleSelect(m, keepMode) {
   const id = m.id;
   const row = document.querySelector(`.mr[data-id="${id}"]`);
   if (SELECTED.has(id)) { SELECTED.delete(id); row?.classList.remove('sel'); }
   else { SELECTED.set(id, m); row?.classList.add('sel'); }
-  if (!SELECTED.size) { exitSelect(); return; }
+  if (!SELECTED.size && !keepMode) { exitSelect(); return; }
   updateSelectBar();
 }
 function updateSelectBar() {
@@ -3519,22 +3817,6 @@ function applyEdit(id, newText) {
     }
   }
 }
-function applyReactions(msgId, reactions) {
-  const bub = document.querySelector(`.bub[data-id="${msgId}"]`);
-  if (!bub) return;
-  let rr = bub.querySelector('.reacts'); if (rr) rr.remove();
-  if (reactions && Object.keys(reactions).length) {
-    rr = document.createElement('div'); rr.className = 'reacts';
-    for (const [em, uids] of Object.entries(reactions)) {
-      const x = document.createElement('div');
-      x.className = 'react' + (uids.includes(ME.id) ? ' mine' : '');
-      x.innerHTML = `${em} <span class="react-n">${uids.length}</span>`;
-      x.onclick = e => { e.stopPropagation(); toggleReact(msgId, em); };
-      rr.appendChild(x);
-    }
-    bub.appendChild(rr);
-  }
-}
 function editMsg(m) {
   if (m.msg_type && m.msg_type !== 'text') return toast('Это сообщение нельзя редактировать', 'i');
   if (m.id === 'tmp') return toast('Сообщение ещё отправляется…', 'i');
@@ -3591,6 +3873,7 @@ function delMsg(m, kind) {
   }
 }
 function removeMsgRow(id) {
+  REACT_CACHE.delete(String(id));
   const row = document.querySelector(`.mr[data-id="${id}"]`);
   if (!row) return;
   // collapse smoothly so neighbours don't "jump"
