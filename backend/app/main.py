@@ -1,12 +1,13 @@
-import json, logging, base64, os, datetime as dt
+import json, logging, base64, os, datetime as dt, time
 from typing import Optional, List
+from collections import defaultdict
 from fastapi import (FastAPI, Depends, HTTPException, status,
                      WebSocket, WebSocketDisconnect, Header, UploadFile, File, Request)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, and_
+from sqlalchemy import or_, and_, exists
 from pydantic import BaseModel
 import pathlib, re
 
@@ -60,8 +61,14 @@ def _auto_migrate():
 _auto_migrate()
 
 app = FastAPI(title="Корпоративный чат")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
-                   allow_methods=["*"], allow_headers=["*"])
+_cors_raw = os.environ.get("CORS_ORIGINS", "").strip()
+_cors_origins = [o.strip() for o in _cors_raw.split(",") if o.strip()] if _cors_raw else [
+    "http://localhost:8000", "http://127.0.0.1:8000",
+    "http://localhost:5500", "http://127.0.0.1:5500",
+]
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins, allow_credentials=False,
+                   allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+                   allow_headers=["Authorization", "Content-Type"])
 
 _frontend = pathlib.Path(__file__).parent.parent.parent / "frontend"
 if _frontend.exists():
@@ -101,6 +108,9 @@ def check_password(p: str):
     if len(p) < 8: raise HTTPException(422, "Пароль минимум 8 символов")
     if len(p) > 64: raise HTTPException(422, "Пароль максимум 64 символа")
     if not PW_RE.match(p): raise HTTPException(422, "Пароль: только латиница, цифры и символы")
+    if not re.search(r'[A-Z]', p): raise HTTPException(422, "Пароль должен содержать заглавную букву")
+    if not re.search(r'[a-z]', p): raise HTTPException(422, "Пароль должен содержать строчную букву")
+    if not re.search(r'[0-9]', p): raise HTTPException(422, "Пароль должен содержать цифру")
 
 def iso_utc(ts: dt.datetime) -> str:
     if ts.tzinfo is None: ts = ts.replace(tzinfo=dt.timezone.utc)
@@ -117,6 +127,14 @@ def _presence_info(u: User, viewer_id: int = None) -> dict:
         return {"online": True, "last_seen": None}
     return {"online": False, "last_seen": iso_utc(u.last_seen) if u.last_seen else None}
 
+def _group_unread_count(db: Session, gid: int, uid: int) -> int:
+    return db.query(Message).filter(
+        Message.group_id == gid,
+        Message.sender_id != uid,
+        Message.deleted_for_all == False,
+        ~exists().where(and_(MessageRead.message_id == Message.id, MessageRead.user_id == uid)),
+    ).count()
+
 def _record_group_reads(uid: int, msgs: list, db: Session):
     now = _now_utc()
     for msg in msgs:
@@ -125,7 +143,9 @@ def _record_group_reads(uid: int, msgs: list, db: Session):
         if db.query(MessageRead).filter_by(message_id=msg.id, user_id=uid).first():
             continue
         db.add(MessageRead(message_id=msg.id, user_id=uid, read_at=now))
-        msg.is_read = True
+        if not msg.is_read:
+            msg.is_read = True
+            msg.read_at = now
 
 def _mark_dm_reads(uid: int, sender_id: int, up_to_id: int, db: Session) -> list:
     now = _now_utc()
@@ -144,7 +164,7 @@ class RegisterIn(BaseModel):
     phone: str; username: str; password: str
     display_name: Optional[str] = None
 class LoginIn(BaseModel): login: str; password: str
-class RecoverIn(BaseModel): phone: str; new_password: str
+class RecoverIn(BaseModel): phone: str; username: str; new_password: str
 class ProfileUpd(BaseModel):
     display_name: Optional[str]=None; avatar_emoji: Optional[str]=None
     avatar_color: Optional[str]=None; avatar_b64: Optional[str]=None
@@ -206,14 +226,16 @@ def _me_payload(u: User, token=None):
 
 # ── AUTH ──────────────────────────────────────────────────────
 @app.post("/api/check_phone")
-def check_phone(data: PhoneCheck, db: Session = Depends(get_db)):
+def check_phone(data: PhoneCheck, request: Request, db: Session = Depends(get_db)):
+    _rate_limit(f"check:{request.client.host if request.client else 'unknown'}")
     ph = norm_phone(data.phone)
     if not ph: raise HTTPException(422, "Номер должен начинаться с +7 или 8/9 и содержать 11 цифр")
     u = db.query(User).filter(User.phone==ph).first()
-    return {"exists": bool(u), "phone": ph, "username": u.username if u else None}
+    return {"exists": bool(u), "phone": ph}
 
 @app.post("/api/register", status_code=201)
-def register(data: RegisterIn, db: Session = Depends(get_db)):
+def register(data: RegisterIn, request: Request, db: Session = Depends(get_db)):
+    _rate_limit(f"register:{request.client.host if request.client else 'unknown'}")
     ph = norm_phone(data.phone)
     if not ph: raise HTTPException(422, "Некорректный номер")
     un = data.username.strip().lstrip('@')
@@ -234,6 +256,7 @@ def register(data: RegisterIn, db: Session = Depends(get_db)):
 
 @app.post("/api/login")
 def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
+    _rate_limit(f"login:{request.client.host if request.client else 'unknown'}")
     lg = data.login.strip()
     ph = norm_phone(lg)
     u = None
@@ -255,15 +278,20 @@ def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
     return _me_payload(u, token)
 
 @app.post("/api/recover")
-def recover(data: RecoverIn, db: Session = Depends(get_db)):
+def recover(data: RecoverIn, request: Request, db: Session = Depends(get_db)):
+    _rate_limit(f"recover:{request.client.host if request.client else 'unknown'}", limit=5)
     ph = norm_phone(data.phone)
     if not ph: raise HTTPException(422, "Некорректный номер")
+    un = data.username.strip().lstrip('@').lower()
+    if len(un) < 5: raise HTTPException(422, "Укажите username аккаунта")
     u = db.query(User).filter(User.phone==ph).first()
-    if not u: raise HTTPException(404, "Пользователь с таким номером не найден")
+    if not u: raise HTTPException(404, "Пользователь не найден")
+    if u.username.lower() != un:
+        raise HTTPException(403, "Неверный username для этого номера")
     check_password(data.new_password)
     u.hashed_password = hash_password(data.new_password)
     db.commit()
-    return {"status":"ok","username":u.username}
+    return {"status":"ok"}
 
 # ── PROFILE ───────────────────────────────────────────────────
 @app.get("/api/me")
@@ -278,8 +306,12 @@ async def upd_me(d: ProfileUpd, db: Session = Depends(get_db), uid: int = Depend
               "birth_date","folders","hide_online","hide_phone"):
         v = getattr(d, f)
         if v is not None:
-            if f == "avatar_b64" and v == "":
-                v = None
+            if f == "avatar_b64":
+                v = _safe_avatar_b64(None if v == "" else v)
+            elif f == "avatar_color":
+                v = _safe_avatar_color(v)
+            elif f == "avatar_emoji":
+                v = _safe_avatar_emoji(v)
             if f in ("display_name","avatar_emoji","avatar_color","avatar_b64") and getattr(u, f) != v:
                 visual_changed = True
             setattr(u, f, v)
@@ -329,9 +361,12 @@ def clear_sessions(db: Session = Depends(get_db), uid: int = Depends(_uid)):
 
 @app.post("/api/pin")
 def pin(d: PinChat, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    key = (d.chat_key or "").strip()[:64]
+    if not key or len(key) < 2:
+        raise HTTPException(422, "Некорректный чат")
     u = _user(uid, db)
     pins = set((u.pinned_chats or "").split(","))-{""}
-    (pins.add if d.pinned else pins.discard)(d.chat_key)
+    (pins.add if d.pinned else pins.discard)(key)
     u.pinned_chats = ",".join(pins); db.commit()
     return {"pinned_chats": u.pinned_chats}
 
@@ -342,6 +377,9 @@ def toggle_fav(d: FavIn, db: Session = Depends(get_db), uid: int = Depends(_uid)
     try: favs = json.loads(u.favorites or "[]")
     except: favs = []
     if d.add:
+        m = db.query(Message).filter(Message.id == d.msg_id).first()
+        if not _can_access_message(m, uid, db):
+            raise HTTPException(403, "Нет доступа к сообщению")
         if d.msg_id not in favs: favs.append(d.msg_id)
     else:
         favs = [x for x in favs if x != d.msg_id]
@@ -353,13 +391,17 @@ def get_favs(db: Session = Depends(get_db), uid: int = Depends(_uid)):
     u = _user(uid, db)
     try: fav_ids = json.loads(u.favorites or "[]")
     except: fav_ids = []
+    if not fav_ids:
+        return []
     msgs = db.query(Message).filter(Message.id.in_(fav_ids),
                                     Message.deleted_for_all==False).all()
-    return _mdict_list(msgs, uid)
+    return [_mdict(m, uid) for m in msgs if _can_access_message(m, uid, db)]
 
 # ── TYPING ────────────────────────────────────────────────────
 @app.post("/api/typing")
 async def typing(d: TypingIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
+    if not _can_typing_target(uid, d.group_id, d.recipient_id, db):
+        raise HTTPException(403, "Нет доступа")
     u = _user(uid, db)
     ev = {"event":"typing","sender_id":uid,"display_name":u.display_name or u.username,
           "typing":d.typing,"group_id":d.group_id,"recipient_id":d.recipient_id}
@@ -470,6 +512,58 @@ def _hide_for(m: Message, uid: int, db: Session):
 def _visible_for(m: Message, uid: int) -> bool:
     return not m.deleted_for_all and not _hidden_for(m, uid)
 
+HEX_COLOR_RE = re.compile(r'^#[0-9a-fA-F]{6}$')
+BLOCKED_UPLOAD_EXTS = {'html', 'htm', 'svg', 'xhtml', 'js', 'mjs', 'exe', 'bat', 'cmd', 'ps1', 'vbs', 'sh'}
+_rate_buckets: dict[str, list[float]] = defaultdict(list)
+
+def _rate_limit(key: str, limit: int = 8, window: int = 300):
+    now = time.time()
+    bucket = _rate_buckets[key]
+    _rate_buckets[key] = [t for t in bucket if now - t < window]
+    if len(_rate_buckets[key]) >= limit:
+        raise HTTPException(429, "Слишком много попыток. Подождите несколько минут.")
+    _rate_buckets[key].append(now)
+
+def _safe_avatar_color(c: Optional[str]) -> str:
+    c = (c or "").strip()
+    return c if HEX_COLOR_RE.match(c) else "#2AABEE"
+
+def _safe_avatar_emoji(e: Optional[str]) -> str:
+    e = (e or "").strip()
+    if not e or len(e) > 8:
+        return "😊"
+    return e
+
+def _safe_avatar_b64(v: Optional[str]) -> Optional[str]:
+    if not v:
+        return None
+    v = str(v).strip()
+    if not v.startswith("data:image/"):
+        return None
+    head = v.split(",", 1)[0].lower()
+    if "html" in head or "svg" in head:
+        return None
+    if len(v) > 600_000:
+        return None
+    return v
+
+def _can_access_message(m: Optional[Message], uid: int, db: Session) -> bool:
+    if not m or not _visible_for(m, uid):
+        return False
+    if m.group_id:
+        return bool(db.query(GroupMember).filter_by(group_id=m.group_id, user_id=uid).first())
+    return uid in (m.sender_id, m.recipient_id)
+
+def _can_typing_target(uid: int, group_id: Optional[int], recipient_id: Optional[int], db: Session) -> bool:
+    if group_id:
+        return bool(db.query(GroupMember).filter_by(group_id=int(group_id), user_id=uid).first())
+    if recipient_id:
+        rid = int(recipient_id)
+        if rid == uid:
+            return True
+        return bool(db.query(User).filter(User.id == rid).first())
+    return False
+
 def _last_visible(msgs, uid: int):
     for m in msgs:
         if _visible_for(m, uid):
@@ -555,10 +649,13 @@ async def _broadcast_presence(uid: int, online: bool, db: Session, ws: WebSocket
 
 async def _persist_message(uid: int, msg: dict):
     """Store a message and push it to recipients. Shared by WebSocket and REST send."""
-    text = str(msg.get("text", ""))[:200000]
+    mtype = msg.get("msg_type", "text")
+    text = str(msg.get("text", ""))
+    if mtype == "text" and len(text) > 4096:
+        raise HTTPException(422, "Слишком длинное сообщение")
+    text = text[:2000000 if mtype == "voice" else 200000]
     if not text:
         raise HTTPException(422, "Пустое сообщение")
-    mtype = msg.get("msg_type", "text")
     fname = msg.get("file_name")
     caption = str(msg.get("caption") or "")[:500]
     gid = msg.get("group_id")
@@ -768,7 +865,10 @@ async def edit_msg(mid: int, d: MsgEdit, db: Session = Depends(get_db), uid: int
     now = dt.datetime.now(dt.timezone.utc)
     ts = m.timestamp if m.timestamp.tzinfo else m.timestamp.replace(tzinfo=dt.timezone.utc)
     if (now-ts).total_seconds() > 86400: raise HTTPException(403, "Редактирование доступно 24 часа")
-    m.enc_text = enc(d.text); m.edited = True; db.commit(); db.refresh(m)
+    text = (d.text or "").strip()
+    if not text: raise HTTPException(422, "Пустой текст")
+    if len(text) > 4096: raise HTTPException(422, "Слишком длинное сообщение")
+    m.enc_text = enc(text); m.edited = True; db.commit(); db.refresh(m)
     md = _mdict(m)
     await _broadcast({"event":"edited", **md}, _msg_targets(m, db))
     return md
@@ -777,6 +877,8 @@ async def edit_msg(mid: int, d: MsgEdit, db: Session = Depends(get_db), uid: int
 async def pin_msg(mid: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
     m = db.query(Message).filter(Message.id==mid).first()
     if not m: raise HTTPException(404, "Не найдено")
+    if not _can_access_message(m, uid, db):
+        raise HTTPException(403, "Нет доступа")
     m.pinned = not m.pinned; db.commit()
     await _broadcast({"event":"pinned","id":m.id,"pinned":m.pinned,
                       "group_id":m.group_id,"recipient_id":m.recipient_id,
@@ -787,12 +889,16 @@ async def pin_msg(mid: int, db: Session = Depends(get_db), uid: int = Depends(_u
 async def react(mid: int, d: ReactIn, db: Session = Depends(get_db), uid: int = Depends(_uid)):
     m = db.query(Message).filter(Message.id==mid).first()
     if not m: raise HTTPException(404, "Не найдено")
+    if not _can_access_message(m, uid, db):
+        raise HTTPException(403, "Нет доступа")
+    emoji = (d.emoji or "").strip()[:8]
+    if not emoji: raise HTTPException(422, "Некорректная реакция")
     r = json.loads(m.reactions or "{}")
-    lst = r.get(d.emoji, [])
+    lst = r.get(emoji, [])
     if uid in lst: lst.remove(uid)
     else: lst.append(uid)
-    if lst: r[d.emoji]=lst
-    elif d.emoji in r: del r[d.emoji]
+    if lst: r[emoji]=lst
+    elif emoji in r: del r[emoji]
     m.reactions = json.dumps(r); db.commit()
     await _broadcast({"event":"reaction","id":m.id,"reactions":r,
                       "group_id":m.group_id,"recipient_id":m.recipient_id,
@@ -802,29 +908,38 @@ async def react(mid: int, d: ReactIn, db: Session = Depends(get_db), uid: int = 
 @app.get("/api/pinned/{chat_type}/{chat_id}")
 def pinned_msgs(chat_type: str, chat_id: int, db: Session = Depends(get_db), uid: int = Depends(_uid)):
     q = db.query(Message).filter(Message.pinned==True, Message.deleted_for_all==False)
-    if chat_type=="g": q = q.filter(Message.group_id==chat_id)
+    if chat_type=="g":
+        if not db.query(GroupMember).filter_by(group_id=chat_id, user_id=uid).first():
+            raise HTTPException(403, "Нет доступа")
+        q = q.filter(Message.group_id==chat_id)
     else: q = q.filter(Message.group_id==None, or_(
         and_(Message.sender_id==uid, Message.recipient_id==chat_id),
         and_(Message.sender_id==chat_id, Message.recipient_id==uid)))
-    return _mdict_list(q.order_by(Message.timestamp.asc()).all(), uid)
+    return _mdict_list(q.order_by(Message.id.desc()).all(), uid)
 
 # ── FILES ─────────────────────────────────────────────────────
 _updir = pathlib.Path(__file__).parent.parent.parent / "uploads"
 _updir.mkdir(exist_ok=True)
 
-IMAGE_EXTS = {'jpg','jpeg','png','gif','webp','bmp','svg'}
+IMAGE_EXTS = {'jpg','jpeg','png','gif','webp','bmp'}
 
 @app.post("/api/upload")
 async def upload(file: UploadFile = File(...), uid: int = Depends(_uid)):
     content = await file.read()
     if len(content) > 50*1024*1024: raise HTTPException(413, "Максимум 50 МБ")
-    ext = (file.filename.split('.')[-1] or '').lower()
+    fname = (file.filename or "file").strip()
+    if len(fname) > 200 or ".." in fname or "/" in fname or "\\" in fname:
+        raise HTTPException(400, "Некорректное имя файла")
+    ext = (fname.split('.')[-1] if '.' in fname else '').lower()
+    if not ext or ext in BLOCKED_UPLOAD_EXTS:
+        raise HTTPException(400, "Тип файла не поддерживается")
     msg_type = 'image' if ext in IMAGE_EXTS else 'file'
     mime = file.content_type or ("image/"+ext if msg_type=='image' else "application/octet-stream")
+    if msg_type == 'image' and not mime.startswith('image/'):
+        mime = f"image/{ext}"
     b64 = base64.b64encode(content).decode()
-    # full data URL — directly usable as <img src> or download href
     data_url = f"data:{mime};base64,{b64}"
-    return {"file_name": file.filename,
+    return {"file_name": fname,
             "data_b64": data_url,
             "size": len(content),
             "msg_type": msg_type,
@@ -860,9 +975,7 @@ def get_group(gid: int, db: Session = Depends(get_db), uid: int = Depends(_uid))
     last_text = ""
     if last:
         last_text = _msg_preview(last)
-    unread = db.query(Message).filter(Message.group_id==gid,
-        Message.sender_id!=uid, Message.is_read==False,
-        Message.deleted_for_all==False).count()
+    unread = _group_unread_count(db, gid, uid)
     return {"id": g.id, "name": g.name, "avatar_emoji": g.avatar_emoji,
             "avatar_b64": g.avatar_b64, "member_count": cnt, "is_admin": gm.is_admin,
             "last_text": last_text,
@@ -877,9 +990,7 @@ def my_groups(db: Session = Depends(get_db), uid: int = Depends(_uid)):
             cnt = db.query(GroupMember).filter(GroupMember.group_id==g.id).count()
             recent = db.query(Message).filter(Message.group_id==g.id).order_by(Message.timestamp.desc()).limit(30).all()
             last = _last_visible(recent, uid)
-            unread = db.query(Message).filter(Message.group_id==g.id,
-                Message.sender_id!=uid, Message.is_read==False,
-                Message.deleted_for_all==False).count()
+            unread = _group_unread_count(db, g.id, uid)
             last_text = ""
             if last:
                 last_text = _msg_preview(last)
@@ -1114,13 +1225,17 @@ async def ws(websocket: WebSocket, token: str):
                 try: await websocket.send_text(json.dumps({"event": "pong"}))
                 except Exception: pass
                 continue
-            if msg.get("ping"):
-                try: await websocket.send_text(json.dumps({"event": "pong"}))
-                except Exception: pass
-                continue
             try:
                 await _persist_message(uid, msg)
-            except HTTPException:
+            except HTTPException as he:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "event": "error",
+                        "detail": he.detail if isinstance(he.detail, str) else str(he.detail),
+                        "temp_id": msg.get("temp_id"),
+                    }))
+                except Exception:
+                    pass
                 continue
             except Exception as e:
                 logger.error("WS persist uid=%s: %s", uid, e)

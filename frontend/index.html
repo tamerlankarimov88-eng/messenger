@@ -3,8 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#3390EC">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Чат">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss:; media-src 'self' blob: data:; frame-src 'none'; object-src 'none'; base-uri 'self';">
 <title>Корпоративный чат</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%233390EC'/%3E%3Ctext x='32' y='42' font-family='Roboto,Arial,sans-serif' font-size='26' font-weight='500' fill='%23fff' text-anchor='middle'%3E%D0%9C%D0%9C%3C/text%3E%3C/svg%3E">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
@@ -101,6 +109,9 @@
     <div class="astep" id="as-recover" style="display:none">
       <h3 class="ah">Восстановление</h3>
       <p class="ap">Новый пароль для <b id="rec-phone-lbl"></b></p>
+      <div class="fg"><label>Username</label>
+        <input type="text" id="rec-un" placeholder="IIvanov" autocomplete="username" spellcheck="false">
+      </div>
       <div class="fg"><div class="pw-w">
         <input type="password" id="rec-pw" placeholder="Новый пароль">
         <button class="pw-eye" onclick="tglPw('rec-pw')" tabindex="-1">
@@ -140,6 +151,7 @@
     <div class="rail-item" onclick="openSettings()" title="Настройки">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       <span class="rail-label">Настройки</span>
+      <span class="rail-dnd-badge" id="rail-dnd-badge" style="display:none" title="Не беспокоить">🌙</span>
     </div>
   </nav>
 
@@ -179,6 +191,14 @@
         <button class="sb-mi" onclick="openCreateFolder();closeSbMenu()">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
           <span>Папки с чатами</span>
+        </button>
+        <button class="sb-mi" id="sb-mi-unread" onclick="toggleUnreadFilter();closeSbMenu()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+          <span>Непрочитанные</span>
+        </button>
+        <button class="sb-mi" onclick="toggleDndQuick();closeSbMenu()">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <span id="sb-dnd-lbl">Не беспокоить</span>
         </button>
         <div class="sb-mi-sep"></div>
         <button class="sb-mi sb-mi-danger" onclick="confirmLogout();closeSbMenu()">
@@ -224,6 +244,9 @@
         </div>
       </div>
 
+      <!-- pinned messages bar -->
+      <div class="pinbar" id="pinbar" style="display:none" role="button" tabindex="0" title="Перейти к закреплённому"></div>
+
       <!-- selection action bar (Telegram-style) -->
       <div class="select-bar" id="select-bar" style="display:none">
         <button class="ib" onclick="exitSelect()" title="Отмена">
@@ -247,7 +270,7 @@
       <!-- chat search bar -->
       <div class="chat-search-bar" id="chat-search-bar" style="display:none">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        <input id="chat-search-inp" class="chat-search-inp" placeholder="Поиск в чате" oninput="runChatSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();chatSearchNav(event.shiftKey?1:-1)}" spellcheck="false">
+        <input id="chat-search-inp" class="chat-search-inp" placeholder="Поиск в чате" oninput="runChatSearchDebounced(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();chatSearchNav(event.shiftKey?1:-1)}" spellcheck="false">
         <span class="chat-search-count" id="chat-search-count">0/0</span>
         <button class="csb-nav" onclick="chatSearchNav(1)" title="Предыдущее"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"/></svg></button>
         <button class="csb-nav" onclick="chatSearchNav(-1)" title="Следующее"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg></button>
@@ -278,17 +301,6 @@
         <button class="fmt-btn s" onmousedown="fmtApply(event,'strike')">S</button>
         <button class="fmt-btn" onmousedown="fmtApply(event,'mono')" style="font-family:monospace">&lt;/&gt;</button>
         <button class="fmt-btn" onmousedown="fmtApply(event,'spoiler')">||</button>
-      </div>
-
-      <!-- voice bar -->
-      <div class="voice-bar" id="voice-bar" style="display:none">
-        <div class="voice-pulse"></div>
-        <span class="voice-time" id="voice-time">0:00</span>
-        <canvas id="voice-wave" width="120" height="28" style="opacity:.75;flex:1;max-width:140px"></canvas>
-        <button class="voice-cancel-btn" onclick="cancelVoice()">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>
-        <button class="btn-pri voice-send-btn" onclick="stopVoice()">Отправить</button>
       </div>
 
       <!-- input row -->
@@ -333,14 +345,32 @@
           </button>
           <input type="file" id="file-inp" style="display:none" multiple onchange="handleFile(this,'file')">
           <input type="file" id="photo-inp" accept="image/*" style="display:none" multiple onchange="handleFile(this,'image')">
-          <div class="inp-wrap">
+          <div class="inp-wrap" id="inp-wrap">
+            <div class="voice-bar" id="voice-bar">
+              <div class="voice-rec-left">
+                <span class="voice-rec-dot" id="voice-rec-dot"></span>
+                <span class="voice-rec-time" id="voice-time">0:00,0</span>
+              </div>
+              <canvas id="voice-wave" class="voice-rec-wave" width="160" height="28"></canvas>
+              <span class="voice-rec-hint" id="voice-rec-hint">Для отмены отпустите курсор вне поля</span>
+              <button type="button" class="voice-rec-cancel" id="voice-rec-cancel" title="Отменить">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg>
+              </button>
+              <button type="button" class="voice-rec-send" id="voice-rec-send" title="Отправить">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M3 11l18-8-8 18-2-7-8-3z" fill="currentColor"/></svg>
+              </button>
+            </div>
             <textarea class="msg-inp" id="msg-inp" placeholder="Сообщение..." rows="1" disabled spellcheck="true"></textarea>
             <button class="ib emoji-btn" id="emoji-btn" title="Эмодзи">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
             </button>
           </div>
           <div class="composer-action" id="composer-action">
-            <button class="ib voice-rec-btn" id="voice-btn" onclick="startVoice()" title="Голосовое сообщение">
+            <div class="voice-lock-pill" id="voice-lock-pill">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="18 15 12 9 6 15"/></svg>
+            </div>
+            <button class="ib voice-rec-btn" id="voice-btn" title="Удерживайте для голосового">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
             </button>
             <button class="send-btn" id="send-btn" onclick="sendMsg()" disabled title="Отправить">
@@ -568,6 +598,17 @@
           </div>
           <div class="sp" id="sp-notif" style="display:none">
             <div class="sp-t">Уведомления</div>
+            <div class="sr"><div class="si-info"><b>Не беспокоить</b><div class="sd" id="dnd-status">Отключить звук и push-уведомления</div></div>
+              <label class="tog"><input type="checkbox" id="dnd-c" onchange="onDndToggle(this)"><span class="tr"></span></label></div>
+            <div class="sr" id="dnd-duration-row" style="display:none">
+              <div class="si-info"><b>Длительность</b><div class="sd">Автовыключение по таймеру</div></div>
+              <select id="dnd-duration" class="dnd-select" onchange="onDndDurationChange()">
+                <option value="0">Пока не выключу</option>
+                <option value="3600">1 час</option>
+                <option value="28800">8 часов</option>
+                <option value="86400">24 часа</option>
+              </select>
+            </div>
             <div class="sr"><div class="si-info"><b>Push-уведомления</b></div>
               <label class="tog"><input type="checkbox" id="push-c" onchange="hdlPush(this)"><span class="tr"></span></label></div>
             <div class="sr"><div class="si-info"><b>Звук</b></div>
@@ -705,5 +746,12 @@
 
 <script src="js/websocket.js"></script>
 <script src="js/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+</script>
 </body>
 </html>

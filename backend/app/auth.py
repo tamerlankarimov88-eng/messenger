@@ -8,6 +8,11 @@ from argon2.exceptions import VerifyMismatchError, VerificationError, InvalidHas
 _ph = PasswordHasher()
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION_ENV_VAR")
+if SECRET_KEY == "CHANGE_ME_IN_PRODUCTION_ENV_VAR":
+    import logging
+    logging.getLogger(__name__).warning(
+        "SECRET_KEY is default — set a strong random SECRET_KEY env var in production"
+    )
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_DAYS = 7
 

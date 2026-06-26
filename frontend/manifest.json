@@ -1,0 +1,20 @@
+{
+  "name": "Корпоративный чат",
+  "short_name": "Чат",
+  "description": "Корпоративный мессенджер",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#17212B",
+  "theme_color": "#3390EC",
+  "lang": "ru",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
